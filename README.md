@@ -154,11 +154,56 @@ The sidecar forwards to Shroud, which inspects and forwards to OpenAI. You'll se
 
 ## Testing
 
+Run these **in order** for a full matrix: fast local checks first, then live API scripts.
+
+| Step | Command | Network | What it covers |
+|------|---------|---------|----------------|
+| 1 | `go test ./...` | No | Proxy handler, config parsing, audit JSON shape, teardown parsing (see `main_test.go`) |
+| 2 | `bash tests/test_integration.sh` | Yes (`api.1claw.xyz`, `shroud.1claw.xyz`) | Bootstrap, `/healthz`, state reuse, proxy to Shroud, BYOK header path, teardown no-op + full teardown, manual mode |
+| 3 | `bash tests/test_security.sh` | Yes | Injection 403, benign vs injection, audit must not leak BYOK bearer; optional OpenAI completion + vault redaction when `OPENAI_API_KEY` is set |
+
+Build the binary before the shell scripts (they invoke `./shroud-sidecar` in the package directory):
+
 ```bash
-go test ./...                    # unit tests (no network)
-bash tests/test_integration.sh   # bootstrap, proxy, teardown (live API)
-bash tests/test_security.sh      # LLM security pipeline via Shroud (live API)
+go build -o shroud-sidecar .
+go test ./...
+bash tests/test_integration.sh
+bash tests/test_security.sh
 ```
+
+### Credentials for live scripts
+
+Integration and security tests need a human **`1ck_` API key**, either:
+
+- `export ONECLAW_MASTER_API_KEY=1ck_...`, or  
+- When this package is checked out under the 1claw monorepo (`packages/1claw-shroud-sidecar/`), a **repository-root** `.env` with `ADMIN_EMAIL` and `ADMIN_PASSWORD` (the scripts mint a temporary `1ck_` key and revoke it on exit). **Standalone clones** of the sidecar repo should use `ONECLAW_MASTER_API_KEY` or adjust the path — the helper looks two levels above the package directory for `.env`.
+
+Optional environment variables:
+
+| Variable | Used by | Purpose |
+|----------|---------|---------|
+| `TEST_PORT` | `test_integration.sh` | Listen port (default **18080**). Set if the default conflicts with another process. |
+| `TEST_SECURITY_PORT` | `test_security.sh` | Listen port (default **18082**). |
+| `OPENAI_API_KEY` or `OPENAI_API_KEY_E2E` | `test_security.sh` | Enables optional real completion + vault secret redaction checks. |
+| `REDACTION_MANIFEST_WAIT_SECS` | `test_security.sh` | Seconds to wait after `PUT` secret before the redaction chat (default **90**). Shroud reloads vault manifests on an interval (~60s). |
+| `REDACTION_RETRY_WAIT_SECS` | `test_security.sh` | Extra wait before a **second** completion attempt if the first still shows the raw secret (default **45**). |
+| `REDACTION_E2E_CHAT` | `test_security.sh` | Set to **0** for **PUT-only** Test 6 (checks Vault accepts the secret; skips the OpenAI echo probe). Useful to confirm the flow without waiting on manifest timing. |
+
+**Test 6 troubleshooting**
+
+- **`PUT .../secrets/...` returns HTTP 500** with a generic RFC 7807 body: the Vault API persists `secret_type` with a DB `CHECK` constraint. Allowed values include `note`, `api_key`, `password`, etc. — **not** `generic`. The script uses `type: note` for the probe secret.
+- **Chat probe still sees the raw secret** after waits: the manifest may not have refreshed yet — raise `REDACTION_MANIFEST_WAIT_SECS` / `REDACTION_RETRY_WAIT_SECS`, or use `REDACTION_E2E_CHAT=0` to validate only the Vault write.
+
+### Integration test scenarios (step 2)
+
+1. **Bootstrap — fresh** — Creates vault, agent, policy; state file `600`; keys present.  
+2. **Health** — `GET /healthz` returns OK (local only).  
+3. **State reuse** — Second start keeps the same agent id.  
+4. **Proxy** — `POST /v1/chat/completions` reaches Shroud (expects **401** without a provider key in vault; proves path works).  
+5. **BYOK** — `Authorization: Bearer sk-...` forwarded; audit line does not need to show 200.  
+6. **Teardown no state** — `teardown` with no state file is a graceful no-op.  
+7. **Teardown full** — Deletes agent + vault, removes state (`ONECLAW_AUTO_DESTROY_VAULT=true`).  
+8. **Manual mode** — Boots with `ONECLAW_AGENT_ID` + `ONECLAW_AGENT_API_KEY` after a one-off bootstrap for credentials.
 
 ### LLM security features (what the tests prove)
 
@@ -171,14 +216,16 @@ The sidecar only **routes traffic and sets headers**; **PII redaction, injection
 | **Audit hygiene** | Structured audit lines on stdout **never** contain the BYOK bearer token. |
 | **Local health** | `GET /healthz` is answered by the sidecar only (does not call Shroud). |
 | **Optional real LLM** | With `OPENAI_API_KEY` or `OPENAI_API_KEY_E2E` set, runs one successful completion through Shroud to the provider. |
-| **Vault secret redaction** | With the same key, stores a random secret in the bootstrap vault, waits for Shroud’s manifest refresh, then asks the model to echo that string. The assistant output **must not** contain the raw secret (Shroud replaces it with `[REDACTED:<path>]` in the request body before the upstream LLM). Uses `REDACTION_MANIFEST_WAIT_SECS` (default **70**) because manifest refresh is periodic (~60s in Shroud). |
+| **Vault secret redaction** | Stores a `note` secret in the bootstrap vault (agent JWT `PUT`), waits for Shroud’s manifest refresh, then sends a BYOK completion that embeds the value. The assistant output **must not** contain the raw secret if Shroud redacted the request body. Tunables: `REDACTION_MANIFEST_WAIT_SECS` (default **90**), `REDACTION_RETRY_WAIT_SECS` (default **45**), or `REDACTION_E2E_CHAT=0` to skip the chat and only verify the Vault write. |
 
 ```bash
 bash tests/test_security.sh
-# Optional: also run a real OpenAI round-trip + vault redaction check
+# Full Test 6 (Vault PUT + OpenAI redaction probe) with OpenAI BYOK:
 OPENAI_API_KEY=sk-... bash tests/test_security.sh
-# Faster manifest wait (may flake if Shroud has not refreshed yet):
-REDACTION_MANIFEST_WAIT_SECS=90 OPENAI_API_KEY=sk-... bash tests/test_security.sh
+# PUT-only Test 6 (no manifest timing / echo probe):
+REDACTION_E2E_CHAT=0 OPENAI_API_KEY=sk-... bash tests/test_security.sh
+# Longer manifest wait if the echo probe flakes:
+REDACTION_MANIFEST_WAIT_SECS=120 REDACTION_RETRY_WAIT_SECS=60 OPENAI_API_KEY=sk-... bash tests/test_security.sh
 ```
 
 Tune blocking thresholds, PII mode, and detectors in the 1Claw dashboard or API (`shroud_config` on the agent), then re-run the script to confirm behavior.
