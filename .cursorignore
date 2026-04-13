@@ -1,0 +1,32 @@
+# Secrets & credentials — keep out of Cursor index
+.env
+.env.*
+!.env.example
+!.env.*.example
+**/.env.local
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+
+**/credentials.json
+**/service-account*.json
+
+# State may contain API keys
+**/.1claw/
+!**/.1claw/.gitkeep
+
+# Build & test artifacts
+shroud-sidecar
+coverage.out
+*.test
+*.exe
+
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shroud-sidecar
+  labels:
+    app: shroud-sidecar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shroud-sidecar
+  template:
+    metadata:
+      labels:
+        app: shroud-sidecar
+    spec:
+      containers:
+        - name: shroud-sidecar
+          image: ghcr.io/1clawai/1claw-shroud-sidecar:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ONECLAW_AGENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: oneclaw-agent
+                  key: agent-id
+            - name: ONECLAW_AGENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: oneclaw-agent
+                  key: api-key
+            - name: ONECLAW_DEFAULT_PROVIDER
+              value: openai
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shroud-sidecar
+spec:
+  selector:
+    app: shroud-sidecar
+  ports:
+    - port: 8080
+      targetPort: 8080

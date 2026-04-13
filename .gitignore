@@ -1,0 +1,23 @@
+# Binary (local build)
+shroud-sidecar
+
+# Env & secrets
+*.env
+.env.*
+!.env.example
+
+# Bootstrap / cached credentials (may contain keys)
+**/.1claw/shroud-sidecar-state.json
+
+# Go
+coverage.out
+*.test
+*.exe
+vendor/
+
+# IDE & OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

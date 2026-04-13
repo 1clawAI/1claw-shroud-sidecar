@@ -1,0 +1,21 @@
+services:
+  shroud-sidecar:
+    build: ..
+    ports:
+      - "8080:8080"
+    environment:
+      # --- Mode 1: Manual (provide pre-existing agent credentials) ---
+      ONECLAW_AGENT_ID: ${ONECLAW_AGENT_ID:-}
+      ONECLAW_AGENT_API_KEY: ${ONECLAW_AGENT_API_KEY:-}
+      # --- Mode 2: Bootstrap (set INSTEAD of the above) ---
+      ONECLAW_MASTER_API_KEY: ${ONECLAW_MASTER_API_KEY:-}
+      ONECLAW_VAULT_NAME: ${ONECLAW_VAULT_NAME:-shroud-sidecar}
+      ONECLAW_AGENT_NAME: ${ONECLAW_AGENT_NAME:-shroud-sidecar-agent}
+      # --- Common ---
+      ONECLAW_DEFAULT_PROVIDER: ${ONECLAW_DEFAULT_PROVIDER:-openai}
+    volumes:
+      - sidecar-state:/home/nonroot/.1claw
+    restart: unless-stopped
+
+volumes:
+  sidecar-state:
