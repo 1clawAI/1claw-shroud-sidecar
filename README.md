@@ -171,14 +171,19 @@ The sidecar only **routes traffic and sets headers**; **PII redaction, injection
 | **Audit hygiene** | Structured audit lines on stdout **never** contain the BYOK bearer token. |
 | **Local health** | `GET /healthz` is answered by the sidecar only (does not call Shroud). |
 | **Optional real LLM** | With `OPENAI_API_KEY` or `OPENAI_API_KEY_E2E` set, runs one successful completion through Shroud to the provider. |
+| **Vault secret redaction** | With the same key, stores a random secret in the bootstrap vault, waits for Shroud’s manifest refresh, then asks the model to echo that string. The assistant output **must not** contain the raw secret (Shroud replaces it with `[REDACTED:<path>]` in the request body before the upstream LLM). Uses `REDACTION_MANIFEST_WAIT_SECS` (default **70**) because manifest refresh is periodic (~60s in Shroud). |
 
 ```bash
 bash tests/test_security.sh
-# Optional: also run a real OpenAI round-trip
+# Optional: also run a real OpenAI round-trip + vault redaction check
 OPENAI_API_KEY=sk-... bash tests/test_security.sh
+# Faster manifest wait (may flake if Shroud has not refreshed yet):
+REDACTION_MANIFEST_WAIT_SECS=90 OPENAI_API_KEY=sk-... bash tests/test_security.sh
 ```
 
 Tune blocking thresholds, PII mode, and detectors in the 1Claw dashboard or API (`shroud_config` on the agent), then re-run the script to confirm behavior.
+
+**Note:** Secret redaction in Shroud is **manifest-driven** (values from your vaults). Response-side redaction uses the same manifest. The sidecar does not perform redaction; it only proxies.
 
 ## Environment variables
 
