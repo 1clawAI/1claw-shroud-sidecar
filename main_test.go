@@ -400,10 +400,7 @@ func TestLoadBootstrapConfigCustom(t *testing.T) {
 
 func TestHealthEndpoint(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
+	mux.HandleFunc("/healthz", healthzHandler)
 
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -417,6 +414,9 @@ func TestHealthEndpoint(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	if resp["status"] != "ok" {
 		t.Errorf("status = %q, want %q", resp["status"], "ok")
+	}
+	if resp["version"] != version {
+		t.Errorf("version = %q, want %q", resp["version"], version)
 	}
 }
 

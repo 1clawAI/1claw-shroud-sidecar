@@ -90,7 +90,31 @@ To also delete the vault, add `ONECLAW_AUTO_DESTROY_VAULT=true`.
 
 ## Quick start
 
-### Binary
+### Install a release (no compile)
+
+Prebuilt binaries are published for **linux/amd64** and **darwin/arm64** on each [GitHub Release](https://github.com/1clawAI/1claw-shroud-sidecar/releases). Container images are pushed to **GHCR** on the same tag.
+
+**One-liner** (installs to `~/.local/bin` by default; set `PREFIX` to change):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/1clawAI/1claw-shroud-sidecar/main/install.sh | sh
+```
+
+Pin a version (recommended once a release exists):
+
+```bash
+SHROUD_SIDECAR_VERSION=v1.0.0 curl -fsSL https://raw.githubusercontent.com/1clawAI/1claw-shroud-sidecar/v1.0.0/install.sh | sh
+```
+
+**Docker (GHCR)** — replace `v1.0.0` with the tag you want (also tagged `latest` on the newest release):
+
+```bash
+docker pull ghcr.io/1clawai/1claw-shroud-sidecar:v1.0.0
+```
+
+Until you publish a release, use **build from source** or **Dockerfile** below.
+
+### Binary (from source)
 
 ```bash
 # Build

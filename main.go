@@ -11,6 +11,9 @@ import (
 	"time"
 )
 
+// Set at link time: go build -ldflags="-X main.version=v1.2.3"
+var version = "dev"
+
 type Config struct {
 	ListenAddr  string
 	ShroudURL   string
@@ -59,10 +62,27 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":  "ok",
+		"version": version,
+	})
+}
+
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "teardown" {
-		runTeardown()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "-h", "--help", "help":
+			fmt.Fprintln(os.Stderr, "usage: shroud-sidecar [-version] [teardown]")
+			os.Exit(0)
+		case "-V", "-version", "--version", "version":
+			fmt.Println(version)
+			os.Exit(0)
+		case "teardown":
+			runTeardown()
+			return
+		}
 	}
 
 	cfg := loadConfig()
@@ -86,13 +106,10 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
+	mux.HandleFunc("/healthz", healthzHandler)
 	mux.HandleFunc("/", proxyHandler(cfg))
 
-	log.Printf("1claw-shroud-sidecar listening on %s → %s (agent %s)", cfg.ListenAddr, cfg.ShroudURL, cfg.AgentID[:8]+"...")
+	log.Printf("1claw-shroud-sidecar %s listening on %s → %s (agent %s)", version, cfg.ListenAddr, cfg.ShroudURL, cfg.AgentID[:8]+"...")
 	if err := http.ListenAndServe(cfg.ListenAddr, mux); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
