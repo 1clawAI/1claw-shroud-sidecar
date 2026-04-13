@@ -574,3 +574,29 @@ func TestWriteError(t *testing.T) {
 		t.Errorf("error = %q", resp["error"])
 	}
 }
+
+// AuditEntry must never gain fields that could echo BYOK or vault material.
+func TestAuditEntryJSONHasNoCredentialFields(t *testing.T) {
+	p := 1
+	c := 2
+	entry := AuditEntry{
+		AgentID:          "agent-uuid",
+		Provider:         "openai",
+		Model:            "gpt-4o-mini",
+		Method:           "POST",
+		Path:             "/v1/chat/completions",
+		StatusCode:       403,
+		PromptTokens:     &p,
+		CompletionTokens: &c,
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	for _, forbidden := range []string{"authorization", "api_key", "bearer", "sk-", "x-shroud-api-key"} {
+		if strings.Contains(strings.ToLower(s), forbidden) {
+			t.Errorf("audit JSON must not contain credential-like substring %q: %s", forbidden, s)
+		}
+	}
+}

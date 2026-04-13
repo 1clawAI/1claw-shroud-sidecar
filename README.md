@@ -152,6 +152,34 @@ The sidecar forwards to Shroud, which inspects and forwards to OpenAI. You'll se
 {"timestamp":"2026-04-12T...","agent_id":"...","provider":"openai","model":"gpt-4o-mini","method":"POST","path":"/v1/chat/completions","status_code":200,"latency_ms":1234,"request_bytes":89,"response_bytes":512,"prompt_token_count":12,"completion_token_count":28}
 ```
 
+## Testing
+
+```bash
+go test ./...                    # unit tests (no network)
+bash tests/test_integration.sh   # bootstrap, proxy, teardown (live API)
+bash tests/test_security.sh      # LLM security pipeline via Shroud (live API)
+```
+
+### LLM security features (what the tests prove)
+
+The sidecar only **routes traffic and sets headers**; **PII redaction, injection scoring, threat detectors, output policy, and per-agent `shroud_config` are enforced in Shroud**, not in this binary. The security script exercises the same path your apps use:
+
+| Check | What it validates |
+|--------|-------------------|
+| **Injection block** | A crafted prompt that exceeds Shroud’s hard injection threshold returns **403** with `error.type: shroud_error` (forwarded unchanged through the sidecar). |
+| **Benign traffic** | A normal prompt is **not** rejected as injection (typically **401** without a provider key in vault, or **200** with `Authorization: Bearer sk-...`). |
+| **Audit hygiene** | Structured audit lines on stdout **never** contain the BYOK bearer token. |
+| **Local health** | `GET /healthz` is answered by the sidecar only (does not call Shroud). |
+| **Optional real LLM** | With `OPENAI_API_KEY` or `OPENAI_API_KEY_E2E` set, runs one successful completion through Shroud to the provider. |
+
+```bash
+bash tests/test_security.sh
+# Optional: also run a real OpenAI round-trip
+OPENAI_API_KEY=sk-... bash tests/test_security.sh
+```
+
+Tune blocking thresholds, PII mode, and detectors in the 1Claw dashboard or API (`shroud_config` on the agent), then re-run the script to confirm behavior.
+
 ## Environment variables
 
 ### Manual mode
