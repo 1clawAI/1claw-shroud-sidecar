@@ -44,7 +44,7 @@ type AuditEntry struct {
 
 func loadConfig() Config {
 	return Config{
-		ListenAddr:  envOr("LISTEN_ADDR", ":8080"),
+		ListenAddr:  envOr("LISTEN_ADDR", "127.0.0.1:8080"),
 		ShroudURL:   strings.TrimRight(envOr("ONECLAW_SHROUD_URL", "https://shroud.1claw.xyz"), "/"),
 		AgentID:     os.Getenv("ONECLAW_AGENT_ID"),
 		AgentAPIKey: os.Getenv("ONECLAW_AGENT_API_KEY"),
