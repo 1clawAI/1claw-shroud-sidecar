@@ -12,5 +12,5 @@ LABEL org.opencontainers.image.source="https://github.com/1clawAI/1claw-shroud-s
 LABEL org.opencontainers.image.version="${VERSION}"
 COPY --from=builder /shroud-sidecar /shroud-sidecar
 USER nonroot:nonroot
-EXPOSE 8080
+EXPOSE 8080 8081
 ENTRYPOINT ["/shroud-sidecar"]

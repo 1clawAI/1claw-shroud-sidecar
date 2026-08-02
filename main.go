@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -15,14 +19,24 @@ import (
 var version = "dev"
 
 type Config struct {
-	ListenAddr  string
-	ShroudURL   string
-	AgentID     string
-	AgentAPIKey string
-	Provider    string
-	Model       string
-	VaultID     string
-	WorkspaceID string
+	ListenAddr      string
+	InboundAddr     string
+	ShroudURL       string
+	BaseURL         string
+	AgentID         string
+	AgentAPIKey     string
+	AgentToken      string
+	Provider        string
+	Model           string
+	VaultID         string
+	WorkspaceID     string
+	RuntimeID       string
+	IdleTimeoutSecs int
+	InboundAuth     string
+	InboundKeyHash  string
+	UserPort        string
+	ScratchMax      int
+	ScratchMaxBytes int
 }
 
 type AuditEntry struct {
@@ -43,15 +57,29 @@ type AuditEntry struct {
 }
 
 func loadConfig() Config {
+	scratchMax, _ := strconv.Atoi(envOr("SCRATCH_MAX_ENTRIES", "1000"))
+	scratchBytes, _ := strconv.Atoi(envOr("SCRATCH_MAX_BYTES", "10485760"))
+	idleTimeout, _ := strconv.Atoi(envOr("IDLE_TIMEOUT_SECS", "1800"))
+
 	return Config{
-		ListenAddr:  envOr("LISTEN_ADDR", "127.0.0.1:8080"),
-		ShroudURL:   strings.TrimRight(envOr("ONECLAW_SHROUD_URL", "https://shroud.1claw.xyz"), "/"),
-		AgentID:     os.Getenv("ONECLAW_AGENT_ID"),
-		AgentAPIKey: os.Getenv("ONECLAW_AGENT_API_KEY"),
-		Provider:    envOr("ONECLAW_DEFAULT_PROVIDER", ""),
-		Model:       os.Getenv("ONECLAW_DEFAULT_MODEL"),
-		VaultID:     os.Getenv("ONECLAW_VAULT_ID"),
-		WorkspaceID: os.Getenv("CODER_WORKSPACE_ID"),
+		ListenAddr:      envOr("LISTEN_ADDR", ":8080"),
+		InboundAddr:     envOr("INBOUND_ADDR", ":8081"),
+		ShroudURL:       strings.TrimRight(envOr("ONECLAW_SHROUD_URL", "https://shroud.1claw.xyz"), "/"),
+		BaseURL:         strings.TrimRight(envOr("ONECLAW_BASE_URL", "https://api.1claw.xyz"), "/"),
+		AgentID:         os.Getenv("ONECLAW_AGENT_ID"),
+		AgentAPIKey:     os.Getenv("ONECLAW_AGENT_API_KEY"),
+		AgentToken:      os.Getenv("ONECLAW_AGENT_TOKEN"),
+		Provider:        envOr("ONECLAW_DEFAULT_PROVIDER", ""),
+		Model:           os.Getenv("ONECLAW_DEFAULT_MODEL"),
+		VaultID:         os.Getenv("ONECLAW_VAULT_ID"),
+		WorkspaceID:     os.Getenv("CODER_WORKSPACE_ID"),
+		RuntimeID:       os.Getenv("ONECLAW_RUNTIME_ID"),
+		IdleTimeoutSecs: idleTimeout,
+		InboundAuth:     envOr("INBOUND_AUTH", "public"),
+		InboundKeyHash:  os.Getenv("INBOUND_API_KEY_HASH"),
+		UserPort:        envOr("USER_PORT", "8000"),
+		ScratchMax:      scratchMax,
+		ScratchMaxBytes: scratchBytes,
 	}
 }
 
@@ -87,10 +115,10 @@ func main() {
 
 	cfg := loadConfig()
 
-	if cfg.AgentID == "" || cfg.AgentAPIKey == "" {
+	if cfg.AgentID == "" || (cfg.AgentAPIKey == "" && cfg.AgentToken == "") {
 		bcfg := loadBootstrapConfig()
 		if bcfg == nil {
-			log.Fatal("Set ONECLAW_AGENT_ID + ONECLAW_AGENT_API_KEY (manual mode), or ONECLAW_MASTER_API_KEY (bootstrap mode)")
+			log.Fatal("Set ONECLAW_AGENT_ID + ONECLAW_AGENT_API_KEY/ONECLAW_AGENT_TOKEN (manual mode), or ONECLAW_MASTER_API_KEY (bootstrap mode)")
 		}
 
 		state, err := bootstrap(bcfg)
@@ -105,14 +133,106 @@ func main() {
 		}
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Token manager for Vault API auth
+	tm := NewTokenManager(cfg.BaseURL, cfg.AgentID, cfg.AgentAPIKey, cfg.AgentToken)
+
+	// Activity tracker for idle detection
+	activity := NewActivityTracker()
+
+	// Scratch LRU cache
+	scratch := NewScratchLRU(cfg.ScratchMax, cfg.ScratchMaxBytes)
+
+	// Internal API mux (:8080)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthzHandler)
-	mux.HandleFunc("/", proxyHandler(cfg))
 
-	log.Printf("1claw-shroud-sidecar %s listening on %s → %s (agent %s)", version, cfg.ListenAddr, cfg.ShroudURL, cfg.AgentID[:8]+"...")
-	if err := http.ListenAndServe(cfg.ListenAddr, mux); err != nil {
+	// Memory API
+	memHandler := NewMemoryHandler(tm, cfg.BaseURL, cfg.AgentID, scratch, activity)
+	mux.Handle("/memory/", memHandler)
+	mux.Handle("/memory", memHandler)
+
+	// Intents proxy
+	intentsHandler := NewIntentsHandler(tm, cfg.ShroudURL, cfg.BaseURL, cfg.AgentID, activity)
+	mux.Handle("/intents/", intentsHandler)
+	mux.Handle("/intents", intentsHandler)
+
+	// Execution proxy
+	execHandler := NewExecuteHandler(tm, cfg.BaseURL, cfg.AgentID, activity)
+	mux.Handle("/execute/", execHandler)
+	mux.Handle("/execute", execHandler)
+
+	// Existing LLM proxy (catch-all)
+	mux.HandleFunc("/", proxyHandler(cfg, activity))
+
+	// Secret file mounts
+	mounts, err := ParseSecretMountsFromEnv()
+	if err != nil {
+		log.Fatalf("[secret-mounts] %v", err)
+	}
+	var secretMounter *SecretMounter
+	if len(mounts) > 0 {
+		if cfg.VaultID == "" {
+			log.Fatal("[secret-mounts] ONECLAW_VAULT_ID required for SECRET_MOUNTS")
+		}
+		secretMounter = NewSecretMounter(tm, cfg.BaseURL, cfg.VaultID, mounts)
+		if err := secretMounter.MountAll(ctx); err != nil {
+			log.Fatalf("[secret-mounts] initial mount failed: %v", err)
+		}
+		go secretMounter.RefreshLoop(ctx)
+	}
+
+	// Idle reporter
+	idleReporter := NewIdleReporter(tm, cfg.BaseURL, cfg.RuntimeID, cfg.IdleTimeoutSecs, activity)
+	go idleReporter.Run(ctx)
+
+	// Inbound security proxy (:8081)
+	inboundAuth := NewInboundAuth(cfg.InboundAuth, cfg.InboundKeyHash, cfg.BaseURL)
+	inbound := NewInboundProxy(cfg.InboundAddr, cfg.UserPort, inboundAuth, tm, cfg.BaseURL, cfg.AgentID, activity)
+	go func() {
+		if err := inbound.Start(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("[inbound-proxy] error: %v", err)
+		}
+	}()
+
+	// SIGTERM handler
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+
+	server := &http.Server{
+		Addr:    cfg.ListenAddr,
+		Handler: ActivityMiddleware(activity, mux),
+	}
+
+	go func() {
+		sig := <-sigCh
+		log.Printf("[shutdown] received %s, shutting down...", sig)
+		cancel()
+
+		// Flush scratch entries to Vault (best-effort, 5s timeout)
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer flushCancel()
+		if n := scratch.Len(); n > 0 {
+			log.Printf("[shutdown] flushing %d scratch entries to Vault...", n)
+			flushed := scratch.FlushToVault(flushCtx, tm, cfg.BaseURL, cfg.AgentID)
+			log.Printf("[shutdown] flushed %d/%d scratch entries", flushed, n)
+		}
+
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutCancel()
+		server.Shutdown(shutCtx)
+	}()
+
+	log.Printf("1claw-shroud-sidecar %s listening on %s → %s (agent %s)", version, cfg.ListenAddr, cfg.ShroudURL, cfg.AgentID[:min(8, len(cfg.AgentID))]+"...")
+	log.Printf("  runtime APIs: memory, intents, execute on %s", cfg.ListenAddr)
+	log.Printf("  inbound proxy on %s → localhost:%s (auth: %s)", cfg.InboundAddr, cfg.UserPort, cfg.InboundAuth)
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
+	log.Println("[shutdown] complete")
 }
 
 func runTeardown() {
@@ -125,11 +245,12 @@ func runTeardown() {
 	}
 }
 
-func proxyHandler(cfg Config) http.HandlerFunc {
+func proxyHandler(cfg Config, activity *ActivityTracker) http.HandlerFunc {
 	client := &http.Client{Timeout: 120 * time.Second}
 	agentKey := cfg.AgentID + ":" + cfg.AgentAPIKey
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		activity.Touch()
 		start := time.Now()
 
 		body, err := io.ReadAll(r.Body)
@@ -172,7 +293,6 @@ func proxyHandler(cfg Config) http.HandlerFunc {
 			proxyReq.Header.Set("X-Shroud-Model", model)
 		}
 
-		// BYOK: forward the caller's provider API key if present.
 		if apiKey := r.Header.Get("Authorization"); apiKey != "" && strings.HasPrefix(apiKey, "Bearer ") {
 			proxyReq.Header.Set("X-Shroud-Api-Key", strings.TrimPrefix(apiKey, "Bearer "))
 		}

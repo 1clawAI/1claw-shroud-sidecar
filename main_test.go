@@ -291,7 +291,7 @@ func TestLoadStateFileMissingFields(t *testing.T) {
 
 func TestLoadConfigDefaults(t *testing.T) {
 	// Clear relevant env vars
-	for _, k := range []string{"LISTEN_ADDR", "ONECLAW_SHROUD_URL", "ONECLAW_AGENT_ID", "ONECLAW_AGENT_API_KEY", "ONECLAW_DEFAULT_PROVIDER", "ONECLAW_DEFAULT_MODEL", "ONECLAW_VAULT_ID", "CODER_WORKSPACE_ID"} {
+	for _, k := range []string{"LISTEN_ADDR", "INBOUND_ADDR", "ONECLAW_SHROUD_URL", "ONECLAW_BASE_URL", "ONECLAW_AGENT_ID", "ONECLAW_AGENT_API_KEY", "ONECLAW_AGENT_TOKEN", "ONECLAW_DEFAULT_PROVIDER", "ONECLAW_DEFAULT_MODEL", "ONECLAW_VAULT_ID", "CODER_WORKSPACE_ID", "ONECLAW_RUNTIME_ID", "IDLE_TIMEOUT_SECS", "INBOUND_AUTH", "INBOUND_API_KEY_HASH", "USER_PORT", "SCRATCH_MAX_ENTRIES", "SCRATCH_MAX_BYTES"} {
 		t.Setenv(k, "")
 	}
 
@@ -467,7 +467,7 @@ func TestProxyHandlerForwardsToUpstream(t *testing.T) {
 		Provider:    "openai",
 	}
 
-	handler := proxyHandler(cfg)
+	handler := proxyHandler(cfg, NewActivityTracker())
 
 	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
@@ -504,7 +504,7 @@ func TestProxyHandlerBYOK(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := Config{ShroudURL: upstream.URL, AgentID: "agent-1", AgentAPIKey: "key-1"}
-	handler := proxyHandler(cfg)
+	handler := proxyHandler(cfg, NewActivityTracker())
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer sk-user-key")
@@ -528,7 +528,7 @@ func TestProxyHandlerStripsIncomingShroudHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := Config{ShroudURL: upstream.URL, AgentID: "agent-1", AgentAPIKey: "key-1"}
-	handler := proxyHandler(cfg)
+	handler := proxyHandler(cfg, NewActivityTracker())
 
 	req := httptest.NewRequest("POST", "/", strings.NewReader(`{}`))
 	req.Header.Set("X-Shroud-Agent-Key", "malicious:attacker")
@@ -548,7 +548,7 @@ func TestProxyHandlerQueryParams(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := Config{ShroudURL: upstream.URL, AgentID: "agent-1", AgentAPIKey: "key-1"}
-	handler := proxyHandler(cfg)
+	handler := proxyHandler(cfg, NewActivityTracker())
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions?stream=true", strings.NewReader(`{}`))
 	w := httptest.NewRecorder()
