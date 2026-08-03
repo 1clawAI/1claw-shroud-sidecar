@@ -344,6 +344,9 @@ func proxyHandler(cfg Config, activity *ActivityTracker) http.HandlerFunc {
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
 
+		// Count upstream response bytes toward runtime egress metering
+		activity.AddEgress(int64(len(body) + len(respBody)))
+
 		usage := extractUsage(respBody)
 		emitAudit(cfg, provider, model, r, int64(len(body)), int64(len(respBody)), resp.StatusCode, start, usage, "")
 	}

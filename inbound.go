@@ -309,7 +309,11 @@ func (ip *InboundProxy) Start(ctx context.Context) error {
 
 		stripSensitiveHeaders(r)
 
-		proxy.ServeHTTP(w, r)
+		cw := &countingResponseWriter{ResponseWriter: w}
+		proxy.ServeHTTP(cw, r)
+		if cw.n > 0 {
+			ip.activity.AddEgress(cw.n)
+		}
 	})
 
 	listener, err := net.Listen("tcp", ip.listenAddr)
@@ -381,6 +385,24 @@ func (ip *InboundProxy) serveAgentCard(w http.ResponseWriter, _ *http.Request) {
 	ip.agentCard.Set(body)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
+}
+
+// countingResponseWriter tracks bytes written toward egress metering.
+type countingResponseWriter struct {
+	http.ResponseWriter
+	n int64
+}
+
+func (c *countingResponseWriter) Write(b []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(b)
+	c.n += int64(n)
+	return n, err
+}
+
+func (c *countingResponseWriter) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func stripSensitiveHeaders(r *http.Request) {

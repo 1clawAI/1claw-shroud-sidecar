@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,7 @@ import (
 type ActivityTracker struct {
 	mu             sync.Mutex
 	lastActivityAt time.Time
+	egressBytes    atomic.Int64
 }
 
 func NewActivityTracker() *ActivityTracker {
@@ -36,16 +38,28 @@ func (a *ActivityTracker) IdleDuration() time.Duration {
 	return time.Since(a.LastActivity())
 }
 
-// IdleReporter periodically PATCHes /v1/runtimes/{id} with the last activity timestamp
-// and logs warnings when idle too long.
+// AddEgress records outbound bytes (LLM proxy / inbound reverse-proxy responses).
+func (a *ActivityTracker) AddEgress(n int64) {
+	if n > 0 {
+		a.egressBytes.Add(n)
+	}
+}
+
+// TakeEgressDelta returns and resets the accumulated egress byte counter.
+func (a *ActivityTracker) TakeEgressDelta() int64 {
+	return a.egressBytes.Swap(0)
+}
+
+// IdleReporter periodically PATCHes /v1/runtimes/{id} with the last activity
+// timestamp and egress byte delta for billing/enforcement.
 type IdleReporter struct {
-	tm           *TokenManager
-	baseURL      string
-	runtimeID    string
-	idleTimeout  time.Duration
-	activity     *ActivityTracker
-	client       *http.Client
-	warnedIdle   bool
+	tm          *TokenManager
+	baseURL     string
+	runtimeID   string
+	idleTimeout time.Duration
+	activity    *ActivityTracker
+	client      *http.Client
+	warnedIdle  bool
 }
 
 func NewIdleReporter(tm *TokenManager, baseURL, runtimeID string, idleTimeoutSecs int, activity *ActivityTracker) *IdleReporter {
@@ -83,6 +97,7 @@ func (ir *IdleReporter) Run(ctx context.Context) {
 func (ir *IdleReporter) report(ctx context.Context) {
 	lastActivity := ir.activity.LastActivity()
 	idle := time.Since(lastActivity)
+	egressDelta := ir.activity.TakeEgressDelta()
 
 	if idle > ir.idleTimeout && !ir.warnedIdle {
 		log.Printf("[idle-reporter] WARNING: runtime %s idle for %s (threshold: %s)", ir.runtimeID, idle.Round(time.Second), ir.idleTimeout)
@@ -92,24 +107,33 @@ func (ir *IdleReporter) report(ctx context.Context) {
 	}
 
 	url := fmt.Sprintf("%s/v1/runtimes/%s", ir.baseURL, ir.runtimeID)
-	body := fmt.Sprintf(`{"last_activity_at":"%s"}`, lastActivity.UTC().Format(time.RFC3339))
+	body := fmt.Sprintf(
+		`{"last_activity_at":"%s","egress_bytes_delta":%d}`,
+		lastActivity.UTC().Format(time.RFC3339),
+		egressDelta,
+	)
 
 	req, err := ir.tm.AuthedRequest("PATCH", url, strings.NewReader(body))
 	if err != nil {
 		log.Printf("[idle-reporter] auth error: %v", err)
+		// Put delta back so we don't lose metering on auth blips
+		ir.activity.AddEgress(egressDelta)
 		return
 	}
 	req = req.WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := ir.client.Do(req)
 	if err != nil {
 		log.Printf("[idle-reporter] PATCH error: %v", err)
+		ir.activity.AddEgress(egressDelta)
 		return
 	}
 	resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
 		log.Printf("[idle-reporter] PATCH returned %d", resp.StatusCode)
+		ir.activity.AddEgress(egressDelta)
 	}
 }
 
