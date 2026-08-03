@@ -278,10 +278,15 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 4096,
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
-		return origin == "" ||
+		if origin == "" {
+			return true
+		}
+		return origin == "https://1claw.xyz" ||
+			origin == "http://1claw.xyz" ||
 			strings.HasSuffix(origin, ".1claw.xyz") ||
-			origin == "https://1claw.xyz" ||
-			strings.HasSuffix(origin, "localhost:3000")
+			strings.HasSuffix(origin, ".vercel.app") ||
+			strings.Contains(origin, "localhost:") ||
+			strings.Contains(origin, "127.0.0.1:")
 	},
 }
 
