@@ -331,11 +331,18 @@ func (h *TerminalHandler) handleSession(conn *websocket.Conn, claims *shellSessi
 		emitTerminalEvent("shell_session_end", claims.Sub, h.runtimeID, duration)
 	}()
 
-	// Interactive shell with a high-contrast prompt (readable in the dashboard xterm).
-	cmd := exec.Command("/bin/sh", "-i")
+	// Prefer bash so PS1 color/cwd escapes work in the dashboard xterm.
+	// Fall back to /bin/sh with a plain ANSI prompt (dash ignores \[\]/\w).
+	shell := "/bin/sh"
+	ps1 := "\033[1;36mruntime\033[0m:\033[1;34m$USER\033[0m$ "
+	if _, err := exec.LookPath("bash"); err == nil {
+		shell = "bash"
+		ps1 = `\[\e[1;36m\]runtime\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ `
+	}
+	cmd := exec.Command(shell, "-i")
 	cmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",
-		`PS1=\[\e[1;36m\]runtime\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ `,
+		"PS1="+ps1,
 	)
 
 	ptmx, err := pty.Start(cmd)
