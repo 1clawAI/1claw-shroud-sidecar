@@ -35,10 +35,10 @@ type TerminalHandler struct {
 	runtimeID      string
 }
 
-// JWKSCache caches the parsed RSA public key from the JWKS endpoint.
+// JWKSCache caches RSA public keys from the JWKS endpoint, keyed by kid.
 type JWKSCache struct {
 	mu        sync.RWMutex
-	key       *rsa.PublicKey
+	keys      map[string]*rsa.PublicKey
 	fetchedAt time.Time
 	ttl       time.Duration
 	url       string
@@ -76,52 +76,79 @@ type terminalMessage struct {
 
 func NewJWKSCache(url string, ttl time.Duration) *JWKSCache {
 	return &JWKSCache{
+		keys:   make(map[string]*rsa.PublicKey),
 		url:    url,
 		ttl:    ttl,
 		client: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
-func (c *JWKSCache) GetKey() (*rsa.PublicKey, error) {
+func (c *JWKSCache) GetKeyByKid(kid string) (*rsa.PublicKey, error) {
 	c.mu.RLock()
-	if c.key != nil && time.Since(c.fetchedAt) < c.ttl {
-		k := c.key
-		c.mu.RUnlock()
-		return k, nil
+	fresh := c.keys != nil && len(c.keys) > 0 && time.Since(c.fetchedAt) < c.ttl
+	if fresh {
+		if kid != "" {
+			if k, ok := c.keys[kid]; ok {
+				c.mu.RUnlock()
+				return k, nil
+			}
+		} else {
+			// No kid — return any cached RSA key (single-key deployments).
+			for _, k := range c.keys {
+				c.mu.RUnlock()
+				return k, nil
+			}
+		}
 	}
 	c.mu.RUnlock()
 
-	return c.refresh()
+	if err := c.refresh(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if kid != "" {
+		if k, ok := c.keys[kid]; ok {
+			return k, nil
+		}
+		return nil, fmt.Errorf("kid %q not found in JWKS", kid)
+	}
+	for _, k := range c.keys {
+		return k, nil
+	}
+	return nil, fmt.Errorf("no suitable RS256 key found in JWKS")
 }
 
-func (c *JWKSCache) refresh() (*rsa.PublicKey, error) {
+func (c *JWKSCache) refresh() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.key != nil && time.Since(c.fetchedAt) < c.ttl {
-		return c.key, nil
+	if len(c.keys) > 0 && time.Since(c.fetchedAt) < c.ttl {
+		return nil
 	}
 
 	resp, err := c.client.Get(c.url)
 	if err != nil {
-		return nil, fmt.Errorf("jwks fetch failed: %w", err)
+		return fmt.Errorf("jwks fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jwks fetch HTTP %d", resp.StatusCode)
+		return fmt.Errorf("jwks fetch HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("jwks read body: %w", err)
+		return fmt.Errorf("jwks read body: %w", err)
 	}
 
 	var jwks jwksResponse
 	if err := json.Unmarshal(body, &jwks); err != nil {
-		return nil, fmt.Errorf("jwks parse: %w", err)
+		return fmt.Errorf("jwks parse: %w", err)
 	}
 
+	keys := make(map[string]*rsa.PublicKey)
 	for _, k := range jwks.Keys {
 		if k.Kty != "RSA" || (k.Alg != "" && k.Alg != "RS256") {
 			continue
@@ -134,13 +161,20 @@ func (c *JWKSCache) refresh() (*rsa.PublicKey, error) {
 		if err != nil {
 			continue
 		}
-
-		c.key = pubKey
-		c.fetchedAt = time.Now()
-		return pubKey, nil
+		kid := k.Kid
+		if kid == "" {
+			kid = "_default"
+		}
+		keys[kid] = pubKey
 	}
 
-	return nil, fmt.Errorf("no suitable RS256 key found in JWKS")
+	if len(keys) == 0 {
+		return fmt.Errorf("no suitable RS256 key found in JWKS")
+	}
+
+	c.keys = keys
+	c.fetchedAt = time.Now()
+	return nil
 }
 
 func parseRSAPublicKey(nB64, eB64 string) (*rsa.PublicKey, error) {
@@ -188,6 +222,7 @@ func (h *TerminalHandler) validateToken(tokenStr string) (*shellSessionClaims, e
 	var header struct {
 		Alg string `json:"alg"`
 		Typ string `json:"typ"`
+		Kid string `json:"kid"`
 	}
 	if err := json.Unmarshal(headerJSON, &header); err != nil {
 		return nil, fmt.Errorf("parse header: %w", err)
@@ -206,7 +241,7 @@ func (h *TerminalHandler) validateToken(tokenStr string) (*shellSessionClaims, e
 		return nil, fmt.Errorf("decode signature: %w", err)
 	}
 
-	pubKey, err := h.jwksCache.GetKey()
+	pubKey, err := h.jwksCache.GetKeyByKid(header.Kid)
 	if err != nil {
 		return nil, fmt.Errorf("get JWKS key: %w", err)
 	}
@@ -291,8 +326,12 @@ func (h *TerminalHandler) handleSession(conn *websocket.Conn, claims *shellSessi
 		emitTerminalEvent("shell_session_end", claims.Sub, h.runtimeID, duration)
 	}()
 
-	cmd := exec.Command("/bin/sh")
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	// Interactive shell with a high-contrast prompt (readable in the dashboard xterm).
+	cmd := exec.Command("/bin/sh", "-i")
+	cmd.Env = append(os.Environ(),
+		"TERM=xterm-256color",
+		`PS1=\[\e[1;36m\]runtime\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ `,
+	)
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
