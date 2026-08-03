@@ -228,6 +228,7 @@ type InboundProxy struct {
 	baseURL    string
 	agentID    string
 	activity   *ActivityTracker
+	terminal   *TerminalHandler
 }
 
 func NewInboundProxy(listenAddr, userPort string, auth *InboundAuth, tm *TokenManager, baseURL, agentID string, activity *ActivityTracker) *InboundProxy {
@@ -245,6 +246,13 @@ func NewInboundProxy(listenAddr, userPort string, auth *InboundAuth, tm *TokenMa
 	}
 }
 
+// WithTerminal attaches the interactive shell WebSocket handler to the inbound mux
+// so /terminal is reachable on the public Cloud Run port (JWT-auth'd, not inbound API key).
+func (ip *InboundProxy) WithTerminal(th *TerminalHandler) *InboundProxy {
+	ip.terminal = th
+	return ip
+}
+
 func (ip *InboundProxy) Start(ctx context.Context) error {
 	target, _ := url.Parse(fmt.Sprintf("http://localhost:%s", ip.userPort))
 	proxy := httputil.NewSingleHostReverseProxy(target)
@@ -253,6 +261,10 @@ func (ip *InboundProxy) Start(ctx context.Context) error {
 	}
 
 	mux := http.NewServeMux()
+	// Shell WebSocket — JWT-authenticated by TerminalHandler (skip inbound API key).
+	if ip.terminal != nil {
+		mux.Handle("/terminal", ip.terminal)
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		ip.activity.Touch()
 

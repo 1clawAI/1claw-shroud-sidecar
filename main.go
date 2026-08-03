@@ -114,11 +114,12 @@ func main() {
 	}
 
 	cfg := loadConfig()
+	shellOnly := envOr("ONECLAW_SHELL_ONLY", "0") == "1"
 
-	if cfg.AgentID == "" || (cfg.AgentAPIKey == "" && cfg.AgentToken == "") {
+	if !shellOnly && (cfg.AgentID == "" || (cfg.AgentAPIKey == "" && cfg.AgentToken == "")) {
 		bcfg := loadBootstrapConfig()
 		if bcfg == nil {
-			log.Fatal("Set ONECLAW_AGENT_ID + ONECLAW_AGENT_API_KEY/ONECLAW_AGENT_TOKEN (manual mode), or ONECLAW_MASTER_API_KEY (bootstrap mode)")
+			log.Fatal("Set ONECLAW_AGENT_ID + ONECLAW_AGENT_API_KEY/ONECLAW_AGENT_TOKEN (manual mode), or ONECLAW_MASTER_API_KEY (bootstrap mode), or ONECLAW_SHELL_ONLY=1")
 		}
 
 		state, err := bootstrap(bcfg)
@@ -131,6 +132,10 @@ func main() {
 		if cfg.VaultID == "" {
 			cfg.VaultID = state.VaultID
 		}
+	}
+
+	if shellOnly {
+		log.Printf("shell-only mode: inbound proxy + /terminal (memory/intents/execute disabled)")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -164,6 +169,20 @@ func main() {
 	mux.Handle("/execute/", execHandler)
 	mux.Handle("/execute", execHandler)
 
+	// Interactive terminal (WebSocket PTY)
+	shellMaxMin, _ := strconv.Atoi(envOr("SHELL_MAX_SESSION_MINUTES", "30"))
+	shellIdleMin, _ := strconv.Atoi(envOr("SHELL_IDLE_TIMEOUT_MINUTES", "10"))
+	shellMaxSessions, _ := strconv.Atoi(envOr("SHELL_MAX_SESSIONS", "2"))
+	termHandler := &TerminalHandler{
+		maxSessions:    shellMaxSessions,
+		sessionTimeout: time.Duration(shellMaxMin) * time.Minute,
+		idleTimeout:    time.Duration(shellIdleMin) * time.Minute,
+		jwksURL:        envOr("ONECLAW_JWKS_URL", "https://api.1claw.xyz/.well-known/jwks.json"),
+		jwksCache:      NewJWKSCache(envOr("ONECLAW_JWKS_URL", "https://api.1claw.xyz/.well-known/jwks.json"), 5*time.Minute),
+		runtimeID:      cfg.RuntimeID,
+	}
+	mux.Handle("/terminal", termHandler)
+
 	// Existing LLM proxy (catch-all)
 	mux.HandleFunc("/", proxyHandler(cfg, activity))
 
@@ -188,9 +207,10 @@ func main() {
 	idleReporter := NewIdleReporter(tm, cfg.BaseURL, cfg.RuntimeID, cfg.IdleTimeoutSecs, activity)
 	go idleReporter.Run(ctx)
 
-	// Inbound security proxy (:8081)
+	// Inbound security proxy (:8081, or :$PORT when used as Cloud Run ingress)
 	inboundAuth := NewInboundAuth(cfg.InboundAuth, cfg.InboundKeyHash, cfg.BaseURL)
-	inbound := NewInboundProxy(cfg.InboundAddr, cfg.UserPort, inboundAuth, tm, cfg.BaseURL, cfg.AgentID, activity)
+	inbound := NewInboundProxy(cfg.InboundAddr, cfg.UserPort, inboundAuth, tm, cfg.BaseURL, cfg.AgentID, activity).
+		WithTerminal(termHandler)
 	go func() {
 		if err := inbound.Start(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("[inbound-proxy] error: %v", err)
@@ -225,8 +245,12 @@ func main() {
 		server.Shutdown(shutCtx)
 	}()
 
-	log.Printf("1claw-shroud-sidecar %s listening on %s → %s (agent %s)", version, cfg.ListenAddr, cfg.ShroudURL, cfg.AgentID[:min(8, len(cfg.AgentID))]+"...")
-	log.Printf("  runtime APIs: memory, intents, execute on %s", cfg.ListenAddr)
+	agentLabel := "none"
+	if cfg.AgentID != "" {
+		agentLabel = cfg.AgentID[:min(8, len(cfg.AgentID))] + "..."
+	}
+	log.Printf("1claw-shroud-sidecar %s listening on %s → %s (agent %s)", version, cfg.ListenAddr, cfg.ShroudURL, agentLabel)
+	log.Printf("  runtime APIs: memory, intents, execute, terminal on %s", cfg.ListenAddr)
 	log.Printf("  inbound proxy on %s → localhost:%s (auth: %s)", cfg.InboundAddr, cfg.UserPort, cfg.InboundAuth)
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
