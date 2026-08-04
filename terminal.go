@@ -33,6 +33,7 @@ type TerminalHandler struct {
 	jwksURL        string
 	jwksCache      *JWKSCache
 	runtimeID      string
+	ptyRegistry    *ptyRegistry
 }
 
 // JWKSCache caches RSA public keys from the JWKS endpoint, keyed by kid.
@@ -66,6 +67,7 @@ type shellSessionClaims struct {
 	Exp       int64  `json:"exp"`
 	Iat       int64  `json:"iat"`
 	Jti       string `json:"jti"`
+	SessionID string `json:"session_id"`
 }
 
 type terminalMessage struct {
@@ -208,7 +210,9 @@ func base64URLDecode(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
 }
 
-func (h *TerminalHandler) validateToken(tokenStr string) (*shellSessionClaims, error) {
+// verifyRuntimeAudienceJWT validates an RS256 JWT from Vault JWKS for a given
+// audience (runtime-shell, runtime-chat) and optional runtime_id binding.
+func verifyRuntimeAudienceJWT(cache *JWKSCache, tokenStr, audience, runtimeID string) (*shellSessionClaims, error) {
 	parts := strings.Split(tokenStr, ".")
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("invalid token format")
@@ -241,7 +245,7 @@ func (h *TerminalHandler) validateToken(tokenStr string) (*shellSessionClaims, e
 		return nil, fmt.Errorf("decode signature: %w", err)
 	}
 
-	pubKey, err := h.jwksCache.GetKeyByKid(header.Kid)
+	pubKey, err := cache.GetKeyByKid(header.Kid)
 	if err != nil {
 		return nil, fmt.Errorf("get JWKS key: %w", err)
 	}
@@ -262,15 +266,19 @@ func (h *TerminalHandler) validateToken(tokenStr string) (*shellSessionClaims, e
 		return nil, fmt.Errorf("token expired")
 	}
 
-	if claims.Aud != "runtime-shell" {
+	if claims.Aud != audience {
 		return nil, fmt.Errorf("invalid audience: %s", claims.Aud)
 	}
 
-	if h.runtimeID != "" && claims.RuntimeID != h.runtimeID {
+	if runtimeID != "" && claims.RuntimeID != runtimeID {
 		return nil, fmt.Errorf("runtime_id mismatch")
 	}
 
 	return &claims, nil
+}
+
+func (h *TerminalHandler) validateToken(tokenStr string) (*shellSessionClaims, error) {
+	return verifyRuntimeAudienceJWT(h.jwksCache, tokenStr, "runtime-shell", h.runtimeID)
 }
 
 var upgrader = websocket.Upgrader{
@@ -332,28 +340,54 @@ func (h *TerminalHandler) handleSession(conn *websocket.Conn, claims *shellSessi
 	}()
 
 	// Prefer bash so PS1 color/cwd escapes work in the dashboard xterm.
-	// Fall back to /bin/sh with a plain ANSI prompt (dash ignores \[\]/\w).
 	shell := "/bin/sh"
 	ps1 := "\033[1;36mruntime\033[0m:\033[1;34m$USER\033[0m$ "
 	if _, err := exec.LookPath("bash"); err == nil {
 		shell = "bash"
 		ps1 = `\[\e[1;36m\]runtime\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ `
 	}
-	cmd := exec.Command(shell, "-i")
-	cmd.Env = append(os.Environ(),
-		"TERM=xterm-256color",
-		"PS1="+ps1,
-	)
 
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		log.Printf("[terminal] failed to start pty: %v", err)
-		conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "failed to start shell"))
-		return
+	if h.ptyRegistry == nil {
+		h.ptyRegistry = newPtyRegistry()
+		go func(reg *ptyRegistry, idle time.Duration) {
+			ticker := time.NewTicker(idle)
+			defer ticker.Stop()
+			for range ticker.C {
+				reg.reapIdle(idle)
+			}
+		}(h.ptyRegistry, h.idleTimeout)
 	}
 
-	sessionCtx, sessionCancel := context.WithTimeout(context.Background(), h.sessionTimeout)
+	live, reattached, err := h.ptyRegistry.getOrCreate(claims.SessionID, shell, ps1)
+	if err != nil {
+		log.Printf("[terminal] failed to start/reattach pty: %v", err)
+		msg := "failed to start shell"
+		if err == errSessionBusy {
+			msg = "session already attached elsewhere"
+		}
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseInternalServerErr, msg))
+		return
+	}
+	if reattached {
+		_ = conn.WriteMessage(websocket.BinaryMessage, []byte("\r\n\x1b[36m[Reattached to shell session]\x1b[0m\r\n"))
+	}
+
+	ptmx := live.ptmx
+	cmd := live.cmd
+	sessionID := claims.SessionID
+
+	// On WS close: detach (keep PTY) if session_id present; otherwise destroy.
+	defer func() {
+		if sessionID != "" {
+			h.ptyRegistry.detach(sessionID)
+		} else {
+			cleanup(cmd, ptmx)
+		}
+	}()
+
+	sessionDeadline := live.createdAt.Add(h.sessionTimeout)
+	sessionCtx, sessionCancel := context.WithDeadline(context.Background(), sessionDeadline)
 	defer sessionCancel()
 
 	idleTimer := time.NewTimer(h.idleTimeout)
@@ -363,25 +397,11 @@ func (h *TerminalHandler) handleSession(conn *websocket.Conn, claims *shellSessi
 	var once sync.Once
 	closeDone := func() { once.Do(func() { close(done) }) }
 
-	// PTY → WebSocket
 	go func() {
 		defer closeDone()
-		buf := make([]byte, 4096)
-		for {
-			n, err := ptmx.Read(buf)
-			if err != nil {
-				if err != io.EOF {
-					log.Printf("[terminal] pty read error: %v", err)
-				}
-				return
-			}
-			if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-				return
-			}
-		}
+		pumpPtyToWS(ptmx, conn, done)
 	}()
 
-	// WebSocket → PTY
 	go func() {
 		defer closeDone()
 		for {
@@ -391,6 +411,9 @@ func (h *TerminalHandler) handleSession(conn *websocket.Conn, claims *shellSessi
 			}
 
 			idleTimer.Reset(h.idleTimeout)
+			live.mu.Lock()
+			live.lastActive = time.Now()
+			live.mu.Unlock()
 
 			if msgType == websocket.TextMessage {
 				var tmsg terminalMessage
@@ -415,11 +438,15 @@ func (h *TerminalHandler) handleSession(conn *websocket.Conn, claims *shellSessi
 	case <-done:
 	case <-sessionCtx.Done():
 		log.Printf("[terminal] session timeout for user %s", claims.Sub)
+		if sessionID != "" {
+			h.ptyRegistry.destroy(sessionID)
+		}
 	case <-idleTimer.C:
 		log.Printf("[terminal] idle timeout for user %s", claims.Sub)
+		if sessionID != "" {
+			h.ptyRegistry.destroy(sessionID)
+		}
 	}
-
-	cleanup(cmd, ptmx)
 }
 
 func cleanup(cmd *exec.Cmd, ptmx *os.File) {

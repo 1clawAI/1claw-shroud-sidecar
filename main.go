@@ -180,6 +180,7 @@ func main() {
 		jwksURL:        envOr("ONECLAW_JWKS_URL", "https://api.1claw.xyz/.well-known/jwks.json"),
 		jwksCache:      NewJWKSCache(envOr("ONECLAW_JWKS_URL", "https://api.1claw.xyz/.well-known/jwks.json"), 5*time.Minute),
 		runtimeID:      cfg.RuntimeID,
+		ptyRegistry:    newPtyRegistry(),
 	}
 	mux.Handle("/terminal", termHandler)
 
