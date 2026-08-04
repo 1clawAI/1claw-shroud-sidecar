@@ -140,21 +140,34 @@ func (c *agentCardCache) Clear() {
 // --- Inbound Auth ---
 
 type InboundAuth struct {
-	mode       string // "api_key", "jwt", "public"
-	keyHash    string // SHA-256 hex of the expected API key
-	jwksURL    string
+	mode      string // "api_key", "jwt", "public"
+	keyHash   string // SHA-256 hex of the expected API key
+	jwksURL   string
+	jwksCache *JWKSCache
 }
 
 func NewInboundAuth(mode, keyHash, baseURL string) *InboundAuth {
 	jwksURL := ""
+	var cache *JWKSCache
 	if mode == "jwt" {
 		jwksURL = strings.TrimRight(baseURL, "/") + "/.well-known/jwks.json"
+		cache = NewJWKSCache(jwksURL, 5*time.Minute)
 	}
 	return &InboundAuth{
-		mode:    mode,
-		keyHash: keyHash,
-		jwksURL: jwksURL,
+		mode:      mode,
+		keyHash:   keyHash,
+		jwksURL:   jwksURL,
+		jwksCache: cache,
 	}
+}
+
+// WithJWKSCache injects a shared JWKS cache (e.g. the terminal handler's).
+func (ia *InboundAuth) WithJWKSCache(cache *JWKSCache) *InboundAuth {
+	if cache != nil {
+		ia.jwksCache = cache
+		ia.jwksURL = cache.url
+	}
+	return ia
 }
 
 func (ia *InboundAuth) Authenticate(r *http.Request) (bool, string) {
@@ -202,22 +215,15 @@ func (ia *InboundAuth) checkJWT(r *http.Request) (bool, string) {
 	}
 	token := strings.TrimPrefix(auth, "Bearer ")
 
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return false, "malformed JWT"
+	// Fail closed: jwt mode requires a JWKS cache and cryptographic verification.
+	// The inbound proxy forwards to the user container (not Vault), so structural
+	// checks alone are an auth bypass.
+	if ia.jwksCache == nil {
+		return false, "JWKS unavailable"
 	}
-
-	// Structural validation: check that all parts are non-empty base64url
-	for _, p := range parts {
-		if len(p) == 0 {
-			return false, "malformed JWT"
-		}
+	if err := verifyInboundAPIJWT(ia.jwksCache, token); err != nil {
+		return false, "invalid JWT: " + err.Error()
 	}
-
-	// Note: Full JWKS-based signature verification would require fetching
-	// the JWKS and implementing Ed25519/RS256 verification. For the sidecar,
-	// we perform structural validation and trust the network boundary
-	// (Vault will reject invalid tokens on the actual API call).
 	return true, ""
 }
 

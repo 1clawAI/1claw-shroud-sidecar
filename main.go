@@ -62,7 +62,9 @@ func loadConfig() Config {
 	idleTimeout, _ := strconv.Atoi(envOr("IDLE_TIMEOUT_SECS", "1800"))
 
 	return Config{
-		ListenAddr:      envOr("LISTEN_ADDR", ":8080"),
+		// Bind internal APIs (memory/intents/execute/terminal) to loopback by
+		// default — never expose unauthenticated privileged ports on 0.0.0.0.
+		ListenAddr:      envOr("LISTEN_ADDR", "127.0.0.1:8080"),
 		InboundAddr:     envOr("INBOUND_ADDR", ":8081"),
 		ShroudURL:       strings.TrimRight(envOr("ONECLAW_SHROUD_URL", "https://shroud.1claw.xyz"), "/"),
 		BaseURL:         strings.TrimRight(envOr("ONECLAW_BASE_URL", "https://api.1claw.xyz"), "/"),
@@ -209,7 +211,8 @@ func main() {
 	go idleReporter.Run(ctx)
 
 	// Inbound security proxy (:8081, or :$PORT when used as Cloud Run ingress)
-	inboundAuth := NewInboundAuth(cfg.InboundAuth, cfg.InboundKeyHash, cfg.BaseURL)
+	inboundAuth := NewInboundAuth(cfg.InboundAuth, cfg.InboundKeyHash, cfg.BaseURL).
+		WithJWKSCache(termHandler.jwksCache)
 	inbound := NewInboundProxy(cfg.InboundAddr, cfg.UserPort, inboundAuth, tm, cfg.BaseURL, cfg.AgentID, activity).
 		WithTerminal(termHandler)
 	go func() {

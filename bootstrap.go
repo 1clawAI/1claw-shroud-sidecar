@@ -51,7 +51,9 @@ func loadBootstrapConfig() *BootstrapConfig {
 		BaseURL:      strings.TrimRight(envOr("ONECLAW_BASE_URL", "https://api.1claw.xyz"), "/"),
 		VaultName:    envOr("ONECLAW_VAULT_NAME", "shroud-sidecar"),
 		AgentName:    envOr("ONECLAW_AGENT_NAME", "shroud-sidecar-agent"),
-		PolicyPath:   envOr("ONECLAW_POLICY_PATH", "**"),
+		// Least privilege: default to read-only on a narrow prefix. Opt into
+		// "**" + write via ONECLAW_POLICY_PATH / createPolicy permissions.
+		PolicyPath:   envOr("ONECLAW_POLICY_PATH", "sidecar/*"),
 		ShroudEnable: true,
 		StateFile:    stateFile,
 	}
@@ -292,11 +294,16 @@ func createAgent(client *http.Client, baseURL, jwt, name, vaultID string, shroud
 }
 
 func createPolicy(client *http.Client, baseURL, jwt, vaultID, agentID, pathPattern string) error {
+	perms := []string{"read"}
+	// Only grant write when the operator explicitly opts into a broad/write path.
+	if pathPattern == "**" || strings.Contains(os.Getenv("ONECLAW_POLICY_PERMISSIONS"), "write") {
+		perms = []string{"read", "write"}
+	}
 	payload := map[string]interface{}{
 		"secret_path_pattern": pathPattern,
 		"principal_type":      "agent",
 		"principal_id":        agentID,
-		"permissions":         []string{"read", "write"},
+		"permissions":         perms,
 	}
 	body, _ := json.Marshal(payload)
 

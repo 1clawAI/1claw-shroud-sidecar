@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
@@ -36,10 +37,11 @@ type TerminalHandler struct {
 	ptyRegistry    *ptyRegistry
 }
 
-// JWKSCache caches RSA public keys from the JWKS endpoint, keyed by kid.
+// JWKSCache caches RSA (RS256) and Ed25519 (EdDSA) public keys from JWKS, keyed by kid.
 type JWKSCache struct {
 	mu        sync.RWMutex
 	keys      map[string]*rsa.PublicKey
+	edKeys    map[string]ed25519.PublicKey
 	fetchedAt time.Time
 	ttl       time.Duration
 	url       string
@@ -57,6 +59,8 @@ type jwkKey struct {
 	Kid string `json:"kid"`
 	N   string `json:"n"`
 	E   string `json:"e"`
+	Crv string `json:"crv"`
+	X   string `json:"x"`
 }
 
 type shellSessionClaims struct {
@@ -79,15 +83,20 @@ type terminalMessage struct {
 func NewJWKSCache(url string, ttl time.Duration) *JWKSCache {
 	return &JWKSCache{
 		keys:   make(map[string]*rsa.PublicKey),
+		edKeys: make(map[string]ed25519.PublicKey),
 		url:    url,
 		ttl:    ttl,
 		client: &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
+func (c *JWKSCache) hasAnyKeysLocked() bool {
+	return len(c.keys) > 0 || len(c.edKeys) > 0
+}
+
 func (c *JWKSCache) GetKeyByKid(kid string) (*rsa.PublicKey, error) {
 	c.mu.RLock()
-	fresh := c.keys != nil && len(c.keys) > 0 && time.Since(c.fetchedAt) < c.ttl
+	fresh := c.hasAnyKeysLocked() && time.Since(c.fetchedAt) < c.ttl
 	if fresh {
 		if kid != "" {
 			if k, ok := c.keys[kid]; ok {
@@ -122,11 +131,47 @@ func (c *JWKSCache) GetKeyByKid(kid string) (*rsa.PublicKey, error) {
 	return nil, fmt.Errorf("no suitable RS256 key found in JWKS")
 }
 
+func (c *JWKSCache) GetEdKeyByKid(kid string) (ed25519.PublicKey, error) {
+	c.mu.RLock()
+	fresh := c.hasAnyKeysLocked() && time.Since(c.fetchedAt) < c.ttl
+	if fresh {
+		if kid != "" {
+			if k, ok := c.edKeys[kid]; ok {
+				c.mu.RUnlock()
+				return k, nil
+			}
+		} else {
+			for _, k := range c.edKeys {
+				c.mu.RUnlock()
+				return k, nil
+			}
+		}
+	}
+	c.mu.RUnlock()
+
+	if err := c.refresh(); err != nil {
+		return nil, err
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if kid != "" {
+		if k, ok := c.edKeys[kid]; ok {
+			return k, nil
+		}
+		return nil, fmt.Errorf("EdDSA kid %q not found in JWKS", kid)
+	}
+	for _, k := range c.edKeys {
+		return k, nil
+	}
+	return nil, fmt.Errorf("no suitable EdDSA key found in JWKS")
+}
+
 func (c *JWKSCache) refresh() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(c.keys) > 0 && time.Since(c.fetchedAt) < c.ttl {
+	if c.hasAnyKeysLocked() && time.Since(c.fetchedAt) < c.ttl {
 		return nil
 	}
 
@@ -151,31 +196,116 @@ func (c *JWKSCache) refresh() error {
 	}
 
 	keys := make(map[string]*rsa.PublicKey)
+	edKeys := make(map[string]ed25519.PublicKey)
 	for _, k := range jwks.Keys {
-		if k.Kty != "RSA" || (k.Alg != "" && k.Alg != "RS256") {
-			continue
-		}
 		if k.Use != "" && k.Use != "sig" {
-			continue
-		}
-
-		pubKey, err := parseRSAPublicKey(k.N, k.E)
-		if err != nil {
 			continue
 		}
 		kid := k.Kid
 		if kid == "" {
 			kid = "_default"
 		}
-		keys[kid] = pubKey
+
+		switch k.Kty {
+		case "RSA":
+			if k.Alg != "" && k.Alg != "RS256" {
+				continue
+			}
+			pubKey, err := parseRSAPublicKey(k.N, k.E)
+			if err != nil {
+				continue
+			}
+			keys[kid] = pubKey
+		case "OKP":
+			if k.Crv != "Ed25519" {
+				continue
+			}
+			if k.Alg != "" && k.Alg != "EdDSA" {
+				continue
+			}
+			xBytes, err := base64URLDecode(k.X)
+			if err != nil || len(xBytes) != ed25519.PublicKeySize {
+				continue
+			}
+			edKeys[kid] = ed25519.PublicKey(xBytes)
+		}
 	}
 
-	if len(keys) == 0 {
-		return fmt.Errorf("no suitable RS256 key found in JWKS")
+	if len(keys) == 0 && len(edKeys) == 0 {
+		return fmt.Errorf("no suitable RS256/EdDSA keys found in JWKS")
 	}
 
 	c.keys = keys
+	c.edKeys = edKeys
 	c.fetchedAt = time.Now()
+	return nil
+}
+
+// verifyInboundAPIJWT verifies a Vault-issued API JWT (EdDSA or RS256) against JWKS.
+// Fail-closed: missing JWKS cache, fetch failure, bad sig, or expired → error.
+func verifyInboundAPIJWT(cache *JWKSCache, tokenStr string) error {
+	if cache == nil {
+		return fmt.Errorf("JWKS unavailable")
+	}
+	parts := strings.Split(tokenStr, ".")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return fmt.Errorf("invalid token format")
+	}
+
+	headerJSON, err := base64URLDecode(parts[0])
+	if err != nil {
+		return fmt.Errorf("decode header: %w", err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+		Kid string `json:"kid"`
+	}
+	if err := json.Unmarshal(headerJSON, &header); err != nil {
+		return fmt.Errorf("parse header: %w", err)
+	}
+
+	payloadJSON, err := base64URLDecode(parts[1])
+	if err != nil {
+		return fmt.Errorf("decode payload: %w", err)
+	}
+	signature, err := base64URLDecode(parts[2])
+	if err != nil {
+		return fmt.Errorf("decode signature: %w", err)
+	}
+
+	signed := []byte(parts[0] + "." + parts[1])
+	switch header.Alg {
+	case "RS256":
+		pubKey, err := cache.GetKeyByKid(header.Kid)
+		if err != nil {
+			return fmt.Errorf("get JWKS RSA key: %w", err)
+		}
+		hash := sha256.Sum256(signed)
+		if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hash[:], signature); err != nil {
+			return fmt.Errorf("signature verification failed")
+		}
+	case "EdDSA":
+		pubKey, err := cache.GetEdKeyByKid(header.Kid)
+		if err != nil {
+			return fmt.Errorf("get JWKS EdDSA key: %w", err)
+		}
+		if !ed25519.Verify(pubKey, signed, signature) {
+			return fmt.Errorf("signature verification failed")
+		}
+	default:
+		return fmt.Errorf("unsupported algorithm: %s", header.Alg)
+	}
+
+	var claims struct {
+		Exp int64  `json:"exp"`
+		Iss string `json:"iss"`
+	}
+	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
+		return fmt.Errorf("parse claims: %w", err)
+	}
+	if claims.Exp <= time.Now().Unix() {
+		return fmt.Errorf("token expired")
+	}
 	return nil
 }
 

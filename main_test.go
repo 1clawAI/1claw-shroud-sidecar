@@ -296,8 +296,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 
 	cfg := loadConfig()
-	if cfg.ListenAddr != ":8080" {
-		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, ":8080")
+	if cfg.ListenAddr != "127.0.0.1:8080" {
+		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, "127.0.0.1:8080")
 	}
 	if cfg.ShroudURL != "https://shroud.1claw.xyz" {
 		t.Errorf("ShroudURL = %q, want %q", cfg.ShroudURL, "https://shroud.1claw.xyz")
@@ -362,7 +362,7 @@ func TestLoadBootstrapConfigDefaults(t *testing.T) {
 	if cfg.AgentName != "shroud-sidecar-agent" {
 		t.Errorf("AgentName = %q", cfg.AgentName)
 	}
-	if cfg.PolicyPath != "**" {
+	if cfg.PolicyPath != "sidecar/*" {
 		t.Errorf("PolicyPath = %q", cfg.PolicyPath)
 	}
 	if !cfg.ShroudEnable {

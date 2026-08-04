@@ -1,7 +1,14 @@
 package main
 
 import (
+	"crypto"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -252,16 +259,60 @@ func TestInboundAuth_APIKey_Missing(t *testing.T) {
 	}
 }
 
-func TestInboundAuth_JWT_Valid(t *testing.T) {
+func TestInboundAuth_JWT_RejectsUnsigned(t *testing.T) {
 	auth := NewInboundAuth("jwt", "", "https://api.1claw.xyz")
+	// Inject empty cache that will fail refresh (fail-closed).
+	auth.jwksCache = &JWKSCache{
+		keys:   map[string]*rsa.PublicKey{},
+		edKeys: map[string]ed25519.PublicKey{},
+		url:    "http://127.0.0.1:1/jwks", // unreachable
+		ttl:    time.Hour,
+		client: &http.Client{Timeout: 50 * time.Millisecond},
+	}
 
-	// Structurally valid JWT (3 base64url parts)
-	validJWT := "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ0ZXN0In0.c2lnbmF0dXJl"
+	// Structurally valid but unsigned/forged JWT must be rejected.
+	forged := "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ0ZXN0IiwiZXhwIjo5OTk5OTk5OTk5fQ.c2lnbmF0dXJl"
 	req := httptest.NewRequest("GET", "/test", nil)
-	req.Header.Set("Authorization", "Bearer "+validJWT)
+	req.Header.Set("Authorization", "Bearer "+forged)
+	ok, reason := auth.Authenticate(req)
+	if ok {
+		t.Errorf("forged JWT must be rejected, got ok with reason %q", reason)
+	}
+}
+
+func TestInboundAuth_JWT_ValidSigned(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &JWKSCache{
+		keys:      map[string]*rsa.PublicKey{"test": &priv.PublicKey},
+		edKeys:    map[string]ed25519.PublicKey{},
+		fetchedAt: time.Now(),
+		ttl:       time.Hour,
+		url:       "inline",
+		client:    &http.Client{},
+	}
+	auth := NewInboundAuth("jwt", "", "https://api.1claw.xyz").WithJWKSCache(cache)
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"test"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(
+		`{"sub":"user:test","exp":%d,"iss":"https://api.1claw.xyz"}`,
+		time.Now().Add(time.Hour).Unix(),
+	)))
+	signingInput := header + "." + payload
+	sum := sha256.Sum256([]byte(signingInput))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, sum[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	ok, reason := auth.Authenticate(req)
 	if !ok {
-		t.Errorf("structurally valid JWT should pass, got reason: %s", reason)
+		t.Fatalf("valid signed JWT should pass, got reason: %s", reason)
 	}
 }
 
@@ -281,6 +332,14 @@ func TestInboundAuth_JWT_Invalid(t *testing.T) {
 	ok2, _ := auth.Authenticate(req2)
 	if ok2 {
 		t.Error("malformed JWT should fail")
+	}
+}
+
+func TestLoadConfigListenAddrLoopback(t *testing.T) {
+	t.Setenv("LISTEN_ADDR", "")
+	cfg := loadConfig()
+	if cfg.ListenAddr != "127.0.0.1:8080" {
+		t.Fatalf("default LISTEN_ADDR must be loopback, got %q", cfg.ListenAddr)
 	}
 }
 
