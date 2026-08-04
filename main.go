@@ -270,9 +270,13 @@ func runTeardown() {
 	}
 }
 
+func looksLikeJWT(token string) bool {
+	parts := strings.Split(token, ".")
+	return len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != ""
+}
+
 func proxyHandler(cfg Config, activity *ActivityTracker) http.HandlerFunc {
 	client := &http.Client{Timeout: 120 * time.Second}
-	agentKey := cfg.AgentID + ":" + cfg.AgentAPIKey
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		activity.Touch()
@@ -309,7 +313,6 @@ func proxyHandler(cfg Config, activity *ActivityTracker) http.HandlerFunc {
 			}
 		}
 
-		proxyReq.Header.Set("X-Shroud-Agent-Key", agentKey)
 		proxyReq.Header.Set("Content-Type", "application/json")
 		if provider != "" {
 			proxyReq.Header.Set("X-Shroud-Provider", provider)
@@ -318,8 +321,28 @@ func proxyHandler(cfg Config, activity *ActivityTracker) http.HandlerFunc {
 			proxyReq.Header.Set("X-Shroud-Model", model)
 		}
 
-		if apiKey := r.Header.Get("Authorization"); apiKey != "" && strings.HasPrefix(apiKey, "Bearer ") {
-			proxyReq.Header.Set("X-Shroud-Api-Key", strings.TrimPrefix(apiKey, "Bearer "))
+		// Auth to Shroud:
+		// - Prefer ocv_ API key via X-Shroud-Agent-Key when present.
+		// - Runtimes get ONECLAW_AGENT_TOKEN (JWT) only — never set a blank
+		//   "agent_id:" key (Shroud prefers Agent-Key over Bearer and then
+		//   fails key exchange). Use Authorization Bearer JWT instead.
+		// - Non-JWT Authorization is treated as BYOK provider key.
+		if cfg.AgentAPIKey != "" {
+			proxyReq.Header.Set("X-Shroud-Agent-Key", cfg.AgentID+":"+cfg.AgentAPIKey)
+		} else if cfg.AgentToken != "" {
+			proxyReq.Header.Set("Authorization", "Bearer "+cfg.AgentToken)
+		}
+
+		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+			token := strings.TrimPrefix(auth, "Bearer ")
+			if looksLikeJWT(token) {
+				// Keep/override Authorization with agent JWT; never promote JWT to BYOK.
+				if cfg.AgentAPIKey == "" && cfg.AgentToken == "" {
+					proxyReq.Header.Set("Authorization", "Bearer "+token)
+				}
+			} else if token != "" {
+				proxyReq.Header.Set("X-Shroud-Api-Key", token)
+			}
 		}
 
 		resp, err := client.Do(proxyReq)

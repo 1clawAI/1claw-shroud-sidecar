@@ -516,6 +516,54 @@ func TestProxyHandlerBYOK(t *testing.T) {
 	}
 }
 
+func TestProxyHandlerUsesAgentTokenWhenNoAPIKey(t *testing.T) {
+	jwt := "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJhZ2VudDoxIn0.sig"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Shroud-Agent-Key"); got != "" {
+			t.Errorf("X-Shroud-Agent-Key should be unset when no API key, got %q", got)
+		}
+		if got := r.Header.Get("X-Shroud-Api-Key"); got != "" {
+			t.Errorf("X-Shroud-Api-Key must not be set from JWT, got %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+jwt {
+			t.Errorf("Authorization = %q, want Bearer JWT", got)
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	cfg := Config{
+		ShroudURL:   upstream.URL,
+		AgentID:     "agent-1",
+		AgentToken:  jwt,
+		AgentAPIKey: "",
+	}
+	handler := proxyHandler(cfg, NewActivityTracker())
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+	// Incoming Authorization is also a JWT (e.g. from chat-bridge) — must not become BYOK.
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("status = %d", w.Code)
+	}
+}
+
+func TestLooksLikeJWT(t *testing.T) {
+	if !looksLikeJWT("aaa.bbb.ccc") {
+		t.Error("expected JWT shape")
+	}
+	if looksLikeJWT("sk-openai-key") {
+		t.Error("provider key must not look like JWT")
+	}
+	if looksLikeJWT("agent-id:ocv_key") {
+		t.Error("agent key must not look like JWT")
+	}
+}
+
 func TestProxyHandlerStripsIncomingShroudHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The sidecar sets its own X-Shroud-Agent-Key — the caller's shouldn't leak through
