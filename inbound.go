@@ -144,6 +144,8 @@ type InboundAuth struct {
 	keyHash   string // SHA-256 hex of the expected API key
 	jwksURL   string
 	jwksCache *JWKSCache
+	orgID     string
+	agentID   string
 }
 
 func NewInboundAuth(mode, keyHash, baseURL string) *InboundAuth {
@@ -184,10 +186,9 @@ func (ia *InboundAuth) Authenticate(r *http.Request) (bool, string) {
 }
 
 func (ia *InboundAuth) checkAPIKey(r *http.Request) (bool, string) {
-	// No hash configured — Vault has not provisioned an inbound key yet.
-	// Fail open so shell/chat sidecar ingress still works for dashboard use.
+	// Fail closed: api_key mode without a provisioned hash is an auth bypass.
 	if ia.keyHash == "" {
-		return true, ""
+		return false, "inbound API key not provisioned"
 	}
 
 	key := ""
@@ -208,6 +209,13 @@ func (ia *InboundAuth) checkAPIKey(r *http.Request) (bool, string) {
 	return true, ""
 }
 
+// WithTenantBinding scopes jwt inbound auth to this runtime's org (and agent when sub is agent:*).
+func (ia *InboundAuth) WithTenantBinding(orgID, agentID string) *InboundAuth {
+	ia.orgID = orgID
+	ia.agentID = agentID
+	return ia
+}
+
 func (ia *InboundAuth) checkJWT(r *http.Request) (bool, string) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
@@ -221,7 +229,7 @@ func (ia *InboundAuth) checkJWT(r *http.Request) (bool, string) {
 	if ia.jwksCache == nil {
 		return false, "JWKS unavailable"
 	}
-	if err := verifyInboundAPIJWT(ia.jwksCache, token); err != nil {
+	if err := verifyInboundHostedJWT(ia.jwksCache, token, ia.orgID, ia.agentID); err != nil {
 		return false, "invalid JWT: " + err.Error()
 	}
 	return true, ""
@@ -274,7 +282,8 @@ func (ip *InboundProxy) WithTerminal(th *TerminalHandler) *InboundProxy {
 // authenticateRuntimeChatJWT validates a short-lived Vault-issued JWT
 // (aud=runtime-chat) used by POST /v1/runtimes/{id}/chat to reach the user app.
 func (ip *InboundProxy) authenticateRuntimeChatJWT(r *http.Request) bool {
-	if ip.jwksCache == nil {
+	// Chat ingress is JWT-only — never fall back to inbound_auth (api_key/public).
+	if ip.jwksCache == nil || ip.runtimeID == "" {
 		return false
 	}
 	auth := r.Header.Get("Authorization")
@@ -336,12 +345,14 @@ func (ip *InboundProxy) Start(ctx context.Context) error {
 			return
 		}
 
-		// Vault dashboard chat: accept short-lived aud=runtime-chat JWT
-		// (same JWKS as /terminal), even when inbound_auth is api_key.
+		// Vault dashboard chat: require short-lived aud=runtime-chat JWT bound to this runtime.
 		isChatCompletions := r.Method == http.MethodPost &&
 			(r.URL.Path == "/v1/chat/completions" || strings.HasPrefix(r.URL.Path, "/v1/chat/completions/"))
-		if isChatCompletions && ip.authenticateRuntimeChatJWT(r) {
-			// fall through to proxy
+		if isChatCompletions {
+			if !ip.authenticateRuntimeChatJWT(r) {
+				writeError(w, http.StatusUnauthorized, "runtime-chat JWT required")
+				return
+			}
 		} else {
 			ok, reason := ip.auth.Authenticate(r)
 			if !ok {

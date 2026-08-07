@@ -31,6 +31,7 @@ type Config struct {
 	VaultID         string
 	WorkspaceID     string
 	RuntimeID       string
+	OrgID           string
 	IdleTimeoutSecs int
 	InboundAuth     string
 	InboundKeyHash  string
@@ -76,6 +77,7 @@ func loadConfig() Config {
 		VaultID:         os.Getenv("ONECLAW_VAULT_ID"),
 		WorkspaceID:     os.Getenv("CODER_WORKSPACE_ID"),
 		RuntimeID:       os.Getenv("ONECLAW_RUNTIME_ID"),
+		OrgID:           os.Getenv("ONECLAW_ORG_ID"),
 		IdleTimeoutSecs: idleTimeout,
 		InboundAuth:     envOr("INBOUND_AUTH", "public"),
 		InboundKeyHash:  os.Getenv("INBOUND_API_KEY_HASH"),
@@ -212,7 +214,8 @@ func main() {
 
 	// Inbound security proxy (:8081, or :$PORT when used as Cloud Run ingress)
 	inboundAuth := NewInboundAuth(cfg.InboundAuth, cfg.InboundKeyHash, cfg.BaseURL).
-		WithJWKSCache(termHandler.jwksCache)
+		WithJWKSCache(termHandler.jwksCache).
+		WithTenantBinding(cfg.OrgID, cfg.AgentID)
 	inbound := NewInboundProxy(cfg.InboundAddr, cfg.UserPort, inboundAuth, tm, cfg.BaseURL, cfg.AgentID, activity).
 		WithTerminal(termHandler)
 	go func() {

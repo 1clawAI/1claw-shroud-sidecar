@@ -297,14 +297,51 @@ func verifyInboundAPIJWT(cache *JWKSCache, tokenStr string) error {
 	}
 
 	var claims struct {
-		Exp int64  `json:"exp"`
-		Iss string `json:"iss"`
+		Exp   int64  `json:"exp"`
+		Iss   string `json:"iss"`
+		OrgID string `json:"org_id"`
+		Sub   string `json:"sub"`
 	}
 	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
 		return fmt.Errorf("parse claims: %w", err)
 	}
 	if claims.Exp <= time.Now().Unix() {
 		return fmt.Errorf("token expired")
+	}
+	return nil
+}
+
+// verifyInboundHostedJWT verifies signature/exp and binds the token to this runtime tenant.
+func verifyInboundHostedJWT(cache *JWKSCache, tokenStr, expectedOrgID, expectedAgentID string) error {
+	if err := verifyInboundAPIJWT(cache, tokenStr); err != nil {
+		return err
+	}
+	if expectedOrgID == "" && expectedAgentID == "" {
+		return nil
+	}
+
+	parts := strings.Split(tokenStr, ".")
+	if len(parts) != 3 {
+		return fmt.Errorf("invalid token format")
+	}
+	payloadJSON, err := base64URLDecode(parts[1])
+	if err != nil {
+		return fmt.Errorf("decode payload: %w", err)
+	}
+	var claims struct {
+		OrgID string `json:"org_id"`
+		Sub   string `json:"sub"`
+	}
+	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
+		return fmt.Errorf("parse claims: %w", err)
+	}
+	if expectedOrgID != "" && claims.OrgID != expectedOrgID {
+		return fmt.Errorf("org_id mismatch")
+	}
+	if expectedAgentID != "" && strings.HasPrefix(claims.Sub, "agent:") {
+		if strings.TrimPrefix(claims.Sub, "agent:") != expectedAgentID {
+			return fmt.Errorf("agent mismatch")
+		}
 	}
 	return nil
 }
@@ -414,18 +451,35 @@ func (h *TerminalHandler) validateToken(tokenStr string) (*shellSessionClaims, e
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
+	CheckOrigin:     terminalCheckOrigin,
+}
+
+func terminalCheckOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	// Exact matches (dashboard + local dev).
+	if origin == "https://1claw.xyz" ||
+		origin == "http://1claw.xyz" ||
+		origin == "https://app.1claw.xyz" ||
+		origin == "http://app.1claw.xyz" {
+		return true
+	}
+	// Suffix allowlist: dashboard previews and 1claw subdomains (not WS hostnames).
+	suffixes := []string{
+		".1claw.xyz",
+		".vercel.app",
+	}
+	for _, suffix := range suffixes {
+		if strings.HasSuffix(origin, suffix) {
 			return true
 		}
-		return origin == "https://1claw.xyz" ||
-			origin == "http://1claw.xyz" ||
-			strings.HasSuffix(origin, ".1claw.xyz") ||
-			strings.HasSuffix(origin, ".vercel.app") ||
-			strings.Contains(origin, "localhost:") ||
-			strings.Contains(origin, "127.0.0.1:")
-	},
+	}
+	if strings.Contains(origin, "localhost:") || strings.Contains(origin, "127.0.0.1:") {
+		return true
+	}
+	return false
 }
 
 func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

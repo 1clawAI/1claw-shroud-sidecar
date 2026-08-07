@@ -259,6 +259,20 @@ func TestInboundAuth_APIKey_Missing(t *testing.T) {
 	}
 }
 
+func TestInboundAuth_APIKey_EmptyHashFailsClosed(t *testing.T) {
+	auth := NewInboundAuth("api_key", "", "https://api.1claw.xyz")
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("Authorization", "Bearer any_key")
+	ok, reason := auth.Authenticate(req)
+	if ok {
+		t.Fatal("api_key mode with empty hash must fail closed")
+	}
+	if reason != "inbound API key not provisioned" {
+		t.Errorf("reason = %q", reason)
+	}
+}
+
 func TestInboundAuth_JWT_RejectsUnsigned(t *testing.T) {
 	auth := NewInboundAuth("jwt", "", "https://api.1claw.xyz")
 	// Inject empty cache that will fail refresh (fail-closed).
