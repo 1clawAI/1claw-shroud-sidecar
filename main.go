@@ -402,6 +402,9 @@ func detectProviderFromPath(path string) string {
 	switch {
 	case strings.Contains(p, "/chat/completions"):
 		return "openai"
+	case strings.Contains(p, "/images/"):
+		// DALL-E image generation/edits are OpenAI-only.
+		return "openai"
 	case strings.Contains(p, "/messages"):
 		return "anthropic"
 	case strings.Contains(p, "generatecontent"):

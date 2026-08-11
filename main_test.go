@@ -23,6 +23,7 @@ func TestDetectProviderFromPath(t *testing.T) {
 		{"/v1/messages", "anthropic"},
 		{"/messages", "anthropic"},
 		{"/v1/models/gemini-pro:generateContent", "google"},
+		{"/v1/images/generations", "openai"},
 		{"/unknown/path", ""},
 		{"/", ""},
 	}
