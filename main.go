@@ -189,7 +189,7 @@ func main() {
 	mux.Handle("/terminal", termHandler)
 
 	// Existing LLM proxy (catch-all)
-	mux.HandleFunc("/", proxyHandler(cfg, activity))
+	mux.HandleFunc("/", proxyHandler(cfg, activity, tm))
 
 	// Secret file mounts
 	mounts, err := ParseSecretMountsFromEnv()
@@ -276,12 +276,7 @@ func runTeardown() {
 	}
 }
 
-func looksLikeJWT(token string) bool {
-	parts := strings.Split(token, ".")
-	return len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != ""
-}
-
-func proxyHandler(cfg Config, activity *ActivityTracker) http.HandlerFunc {
+func proxyHandler(cfg Config, activity *ActivityTracker, tm *TokenManager) http.HandlerFunc {
 	client := &http.Client{Timeout: 120 * time.Second}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -328,25 +323,20 @@ func proxyHandler(cfg Config, activity *ActivityTracker) http.HandlerFunc {
 		}
 
 		// Auth to Shroud:
-		// - Prefer ocv_ API key via X-Shroud-Agent-Key when present.
-		// - Runtimes get ONECLAW_AGENT_TOKEN (JWT) only — never set a blank
-		//   "agent_id:" key (Shroud prefers Agent-Key over Bearer and then
-		//   fails key exchange). Use Authorization Bearer JWT instead.
+		// - Prefer agent JWT from chat-bridge (Authorization or X-Refreshed-Agent-Token).
+		// - Fall back to ocv_ API key via X-Shroud-Agent-Key.
+		// - Last resort: ONECLAW_AGENT_TOKEN from container env (may be stale after 2h TTL).
 		// - Non-JWT Authorization is treated as BYOK provider key.
-		if cfg.AgentAPIKey != "" {
+		agentJWT := applyAgentJWTFromRequest(r, tm, cfg.AgentToken)
+		if agentJWT != "" {
+			proxyReq.Header.Set("Authorization", "Bearer "+agentJWT)
+		} else if cfg.AgentAPIKey != "" {
 			proxyReq.Header.Set("X-Shroud-Agent-Key", cfg.AgentID+":"+cfg.AgentAPIKey)
-		} else if cfg.AgentToken != "" {
-			proxyReq.Header.Set("Authorization", "Bearer "+cfg.AgentToken)
 		}
 
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 			token := strings.TrimPrefix(auth, "Bearer ")
-			if looksLikeJWT(token) {
-				// Keep/override Authorization with agent JWT; never promote JWT to BYOK.
-				if cfg.AgentAPIKey == "" && cfg.AgentToken == "" {
-					proxyReq.Header.Set("Authorization", "Bearer "+token)
-				}
-			} else if token != "" {
+			if !looksLikeJWT(token) && token != "" {
 				proxyReq.Header.Set("X-Shroud-Api-Key", token)
 			}
 		}

@@ -353,6 +353,9 @@ func (ip *InboundProxy) Start(ctx context.Context) error {
 				writeError(w, http.StatusUnauthorized, "runtime-chat JWT required")
 				return
 			}
+			if fresh := extractAgentJWT(r); fresh != "" && ip.tm != nil {
+				ip.tm.UpdateStaticJWT(fresh)
+			}
 		} else {
 			ok, reason := ip.auth.Authenticate(r)
 			if !ok {

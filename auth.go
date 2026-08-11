@@ -32,9 +32,21 @@ func NewTokenManager(baseURL, agentID, apiKey, staticToken string) *TokenManager
 	if staticToken != "" {
 		tm.token = staticToken
 		tm.staticJWT = true
-		tm.expiry = time.Now().Add(365 * 24 * time.Hour) // assume long-lived
+		tm.expiry = jwtExpiryFromToken(staticToken)
 	}
 	return tm
+}
+
+// UpdateStaticJWT replaces the in-memory runtime agent JWT (e.g. from Vault chat proxy).
+func (tm *TokenManager) UpdateStaticJWT(token string) {
+	if token == "" || !looksLikeJWT(token) {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.token = token
+	tm.staticJWT = true
+	tm.expiry = jwtExpiryFromToken(token)
 }
 
 func (tm *TokenManager) GetToken() (string, error) {
@@ -49,8 +61,16 @@ func (tm *TokenManager) GetToken() (string, error) {
 	if tm.staticJWT {
 		tm.mu.RLock()
 		tok := tm.token
+		expired := tok != "" && !time.Now().Before(tm.expiry.Add(-60*time.Second))
 		tm.mu.RUnlock()
-		return tok, nil
+		if tok != "" && !expired {
+			return tok, nil
+		}
+		// Runtime JWTs are minted at start; refresh requires Vault/chat to push a new one.
+		if tok != "" {
+			return tok, nil
+		}
+		return "", fmt.Errorf("agent JWT not available")
 	}
 
 	return tm.refresh()
