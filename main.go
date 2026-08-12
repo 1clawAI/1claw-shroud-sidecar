@@ -334,7 +334,10 @@ func proxyHandler(cfg Config, activity *ActivityTracker, tm *TokenManager) http.
 			proxyReq.Header.Set("X-Shroud-Agent-Key", cfg.AgentID+":"+cfg.AgentAPIKey)
 		}
 
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		// BYOK provider key alongside agent JWT (e.g. runtime image-gen vault key).
+		if apiKey := strings.TrimSpace(r.Header.Get("X-Shroud-Api-Key")); apiKey != "" {
+			proxyReq.Header.Set("X-Shroud-Api-Key", apiKey)
+		} else if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 			token := strings.TrimPrefix(auth, "Bearer ")
 			if !looksLikeJWT(token) && token != "" {
 				proxyReq.Header.Set("X-Shroud-Api-Key", token)

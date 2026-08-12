@@ -517,6 +517,39 @@ func TestProxyHandlerBYOK(t *testing.T) {
 	}
 }
 
+func TestProxyHandlerForwardsExplicitBYOKHeaderWithJWT(t *testing.T) {
+	jwt := "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJhZ2VudDoxIn0.sig"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+jwt {
+			t.Errorf("Authorization = %q, want Bearer JWT", got)
+		}
+		if got := r.Header.Get("X-Shroud-Api-Key"); got != "sk-vault-openai" {
+			t.Errorf("X-Shroud-Api-Key = %q, want %q", got, "sk-vault-openai")
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	cfg := Config{
+		ShroudURL:   upstream.URL,
+		AgentID:     "agent-1",
+		AgentToken:  jwt,
+		AgentAPIKey: "",
+	}
+	handler := proxyHandler(cfg, NewActivityTracker())
+
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("X-Shroud-Api-Key", "sk-vault-openai")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("status = %d", w.Code)
+	}
+}
+
 func TestProxyHandlerUsesAgentTokenWhenNoAPIKey(t *testing.T) {
 	jwt := "eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJhZ2VudDoxIn0.sig"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
