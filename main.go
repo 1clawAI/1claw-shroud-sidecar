@@ -256,7 +256,13 @@ func main() {
 	if cfg.AgentID != "" {
 		agentLabel = cfg.AgentID[:min(8, len(cfg.AgentID))] + "..."
 	}
+	jwksURL := envOr("ONECLAW_JWKS_URL", cfg.BaseURL+"/.well-known/jwks.json")
+	runtimeLabel := cfg.RuntimeID
+	if runtimeLabel == "" {
+		runtimeLabel = "(unset — runtime-chat JWT validation will fail; Stop then Start the runtime)"
+	}
 	log.Printf("1claw-shroud-sidecar %s listening on %s → %s (agent %s)", version, cfg.ListenAddr, cfg.ShroudURL, agentLabel)
+	log.Printf("  runtime_id=%s jwks_url=%s org_id=%s", runtimeLabel, jwksURL, cfg.OrgID)
 	log.Printf("  runtime APIs: memory, intents, execute, terminal on %s", cfg.ListenAddr)
 	log.Printf("  inbound proxy on %s → localhost:%s (auth: %s)", cfg.InboundAddr, cfg.UserPort, cfg.InboundAuth)
 
