@@ -367,6 +367,17 @@ Once the sidecar forwards to `shroud.1claw.xyz`:
 
 Configure Shroud behavior per-agent in the 1Claw dashboard, CLI (`1claw agent update --shroud`), or SDK.
 
+## Platform v0.56+ (guardrail governance & tx escalation)
+
+Shroud (upstream of this sidecar) adds **v0.56** guardrail governance:
+
+- **Shadow/enforce** execution guardrails — violations audit as `guardrail_shadow.would_deny` in shadow mode.
+- **Address screening** and **Solana simulate_first** on agent guardrails.
+- **Tx escalation** — Shroud heuristics can create HITL approvals via platform admin API.
+- **Graduated HITL** — High-risk agent transactions route to approval queue (dashboard/mobile).
+
+This sidecar is a transparent proxy; no version bump required unless bootstrap API shapes change.
+
 ## License
 
 Apache-2.0
