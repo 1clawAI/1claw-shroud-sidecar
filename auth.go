@@ -12,22 +12,24 @@ import (
 
 // TokenManager handles JWT acquisition and auto-refresh for Vault API calls.
 type TokenManager struct {
-	baseURL  string
-	agentID  string
-	apiKey   string
-	token    string
+	baseURL   string
+	agentID   string
+	apiKey    string
+	runtimeID string
+	token     string
 	staticJWT bool
-	mu       sync.RWMutex
-	expiry   time.Time
-	client   *http.Client
+	mu        sync.RWMutex
+	expiry    time.Time
+	client    *http.Client
 }
 
-func NewTokenManager(baseURL, agentID, apiKey, staticToken string) *TokenManager {
+func NewTokenManager(baseURL, agentID, apiKey, staticToken, runtimeID string) *TokenManager {
 	tm := &TokenManager{
-		baseURL: baseURL,
-		agentID: agentID,
-		apiKey:  apiKey,
-		client:  &http.Client{Timeout: 15 * time.Second},
+		baseURL:   baseURL,
+		agentID:   agentID,
+		apiKey:    apiKey,
+		runtimeID: runtimeID,
+		client:    &http.Client{Timeout: 15 * time.Second},
 	}
 	if staticToken != "" {
 		tm.token = staticToken
@@ -137,5 +139,8 @@ func (tm *TokenManager) AuthedRequest(method, url string, body io.Reader) (*http
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	if tm.runtimeID != "" {
+		req.Header.Set("X-1Claw-Runtime-Id", tm.runtimeID)
+	}
 	return req, nil
 }

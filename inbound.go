@@ -279,24 +279,41 @@ func (ip *InboundProxy) WithTerminal(th *TerminalHandler) *InboundProxy {
 	return ip
 }
 
+// runtimeChatTokenFromRequest reads the Vault-minted aud=runtime-chat JWT.
+// Prefer the dedicated header so Authorization can carry a refreshed agent JWT.
+func runtimeChatTokenFromRequest(r *http.Request) string {
+	if tok := strings.TrimSpace(r.Header.Get("X-1Claw-Runtime-Chat-Token")); looksLikeJWT(tok) {
+		return tok
+	}
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		if looksLikeJWT(token) {
+			return token
+		}
+	}
+	return ""
+}
+
 // authenticateRuntimeChatJWT validates a short-lived Vault-issued JWT
 // (aud=runtime-chat) used by POST /v1/runtimes/{id}/chat to reach the user app.
-func (ip *InboundProxy) authenticateRuntimeChatJWT(r *http.Request) bool {
+func (ip *InboundProxy) authenticateRuntimeChatJWT(r *http.Request) (bool, string) {
 	// Chat ingress is JWT-only — never fall back to inbound_auth (api_key/public).
-	if ip.jwksCache == nil || ip.runtimeID == "" {
-		return false
+	if ip.jwksCache == nil {
+		return false, "JWKS cache unavailable"
 	}
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
-		return false
+	if ip.runtimeID == "" {
+		return false, "ONECLAW_RUNTIME_ID not configured — stop and start the runtime"
 	}
-	token := strings.TrimPrefix(auth, "Bearer ")
+	token := runtimeChatTokenFromRequest(r)
+	if token == "" {
+		return false, "runtime-chat JWT required"
+	}
 	claims, err := verifyRuntimeAudienceJWT(ip.jwksCache, token, "runtime-chat", ip.runtimeID)
 	if err != nil {
-		return false
+		return false, err.Error()
 	}
 	_ = claims
-	return true
+	return true, ""
 }
 
 func (ip *InboundProxy) Start(ctx context.Context) error {
@@ -349,11 +366,16 @@ func (ip *InboundProxy) Start(ctx context.Context) error {
 		isChatCompletions := r.Method == http.MethodPost &&
 			(r.URL.Path == "/v1/chat/completions" || strings.HasPrefix(r.URL.Path, "/v1/chat/completions/"))
 		if isChatCompletions {
-			if !ip.authenticateRuntimeChatJWT(r) {
-				writeError(w, http.StatusUnauthorized, "runtime-chat JWT required")
+			ok, reason := ip.authenticateRuntimeChatJWT(r)
+			if !ok {
+				msg := "runtime-chat JWT required"
+				if reason != "" && reason != msg {
+					msg = msg + ": " + reason
+				}
+				writeError(w, http.StatusUnauthorized, msg)
 				return
 			}
-			if fresh := extractAgentJWT(r); fresh != "" && ip.tm != nil {
+			if fresh := strings.TrimSpace(r.Header.Get("X-Refreshed-Agent-Token")); looksLikeJWT(fresh) && ip.tm != nil {
 				ip.tm.UpdateStaticJWT(fresh)
 			}
 		} else {

@@ -12,7 +12,7 @@ func TestApplyAgentJWTFromRequestPrefersIncomingJWT(t *testing.T) {
 	stale := makeTestJWT(time.Now().Add(-time.Hour))
 	fresh := makeTestJWT(time.Now().Add(time.Hour))
 
-	tm := NewTokenManager("https://api.1claw.xyz", "agent-id", "", stale)
+	tm := NewTokenManager("https://api.1claw.xyz", "agent-id", "", stale, "")
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer "+fresh)
 

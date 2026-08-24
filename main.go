@@ -146,7 +146,7 @@ func main() {
 	defer cancel()
 
 	// Token manager for Vault API auth
-	tm := NewTokenManager(cfg.BaseURL, cfg.AgentID, cfg.AgentAPIKey, cfg.AgentToken)
+	tm := NewTokenManager(cfg.BaseURL, cfg.AgentID, cfg.AgentAPIKey, cfg.AgentToken, cfg.RuntimeID)
 
 	// Activity tracker for idle detection
 	activity := NewActivityTracker()

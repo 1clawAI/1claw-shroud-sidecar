@@ -476,7 +476,7 @@ func TestRateLimiter_DifferentIPs(t *testing.T) {
 func TestMemoryHandler_ScratchPutAndGet(t *testing.T) {
 	activity := NewActivityTracker()
 	scratch := NewScratchLRU(100, 1024*1024)
-	tm := NewTokenManager("http://localhost", "agent-1", "key-1", "static-token")
+	tm := NewTokenManager("http://localhost", "agent-1", "key-1", "static-token", "")
 
 	handler := NewMemoryHandler(tm, "http://localhost", "agent-1", scratch, activity)
 
@@ -518,7 +518,7 @@ func TestMemoryHandler_ScratchPutAndGet(t *testing.T) {
 func TestMemoryHandler_DeleteScratch(t *testing.T) {
 	activity := NewActivityTracker()
 	scratch := NewScratchLRU(100, 1024*1024)
-	tm := NewTokenManager("http://localhost", "agent-1", "key-1", "static-token")
+	tm := NewTokenManager("http://localhost", "agent-1", "key-1", "static-token", "")
 
 	handler := NewMemoryHandler(tm, "http://localhost", "agent-1", scratch, activity)
 
@@ -618,7 +618,7 @@ func TestParseSecretMounts_MissingFields(t *testing.T) {
 // ============================================================
 
 func TestTokenManager_StaticToken(t *testing.T) {
-	tm := NewTokenManager("http://localhost", "agent-1", "", "my-static-jwt")
+	tm := NewTokenManager("http://localhost", "agent-1", "", "my-static-jwt", "")
 
 	token, err := tm.GetToken()
 	if err != nil {
@@ -643,7 +643,7 @@ func TestTokenManager_Exchange(t *testing.T) {
 	}))
 	defer server.Close()
 
-	tm := NewTokenManager(server.URL, "agent-1", "ocv_test_key", "")
+	tm := NewTokenManager(server.URL, "agent-1", "ocv_test_key", "", "")
 
 	token, err := tm.GetToken()
 	if err != nil {
@@ -777,7 +777,7 @@ func TestIntentsHandler_RoutesCorrectly(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			tm := NewTokenManager(upstream.URL, "agent-1", "key-1", "static-token")
+			tm := NewTokenManager(upstream.URL, "agent-1", "key-1", "static-token", "")
 			handler := NewIntentsHandler(tm, upstream.URL, upstream.URL, "agent-1", activity)
 
 			var body *strings.Reader
@@ -829,7 +829,7 @@ func TestExecuteHandler_Routes(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			tm := NewTokenManager(upstream.URL, "agent-1", "key-1", "static-token")
+			tm := NewTokenManager(upstream.URL, "agent-1", "key-1", "static-token", "")
 			handler := NewExecuteHandler(tm, upstream.URL, "agent-1", activity)
 
 			var body *strings.Reader
