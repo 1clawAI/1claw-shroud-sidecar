@@ -300,8 +300,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.ListenAddr != "127.0.0.1:8080" {
 		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, "127.0.0.1:8080")
 	}
-	if cfg.ShroudURL != "https://shroud.1claw.xyz" {
-		t.Errorf("ShroudURL = %q, want %q", cfg.ShroudURL, "https://shroud.1claw.xyz")
+	if cfg.ShroudURL != "https://shroud.1claw.co" {
+		t.Errorf("ShroudURL = %q, want %q", cfg.ShroudURL, "https://shroud.1claw.co")
 	}
 }
 
@@ -468,7 +468,7 @@ func TestProxyHandlerForwardsToUpstream(t *testing.T) {
 		Provider:    "openai",
 	}
 
-	handler := proxyHandler(cfg, NewActivityTracker())
+	handler := proxyHandler(cfg, NewActivityTracker(), NewTokenManager("", "", "", "", ""))
 
 	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
@@ -505,7 +505,7 @@ func TestProxyHandlerBYOK(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := Config{ShroudURL: upstream.URL, AgentID: "agent-1", AgentAPIKey: "key-1"}
-	handler := proxyHandler(cfg, NewActivityTracker())
+	handler := proxyHandler(cfg, NewActivityTracker(), NewTokenManager("", "", "", "", ""))
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer sk-user-key")
@@ -537,7 +537,7 @@ func TestProxyHandlerForwardsExplicitBYOKHeaderWithJWT(t *testing.T) {
 		AgentToken:  jwt,
 		AgentAPIKey: "",
 	}
-	handler := proxyHandler(cfg, NewActivityTracker())
+	handler := proxyHandler(cfg, NewActivityTracker(), NewTokenManager("", "", "", "", ""))
 
 	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer "+jwt)
@@ -573,7 +573,7 @@ func TestProxyHandlerUsesAgentTokenWhenNoAPIKey(t *testing.T) {
 		AgentToken:  jwt,
 		AgentAPIKey: "",
 	}
-	handler := proxyHandler(cfg, NewActivityTracker())
+	handler := proxyHandler(cfg, NewActivityTracker(), NewTokenManager("", "", "", "", ""))
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
 	// Incoming Authorization is also a JWT (e.g. from chat-bridge) — must not become BYOK.
@@ -610,7 +610,7 @@ func TestProxyHandlerStripsIncomingShroudHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := Config{ShroudURL: upstream.URL, AgentID: "agent-1", AgentAPIKey: "key-1"}
-	handler := proxyHandler(cfg, NewActivityTracker())
+	handler := proxyHandler(cfg, NewActivityTracker(), NewTokenManager("", "", "", "", ""))
 
 	req := httptest.NewRequest("POST", "/", strings.NewReader(`{}`))
 	req.Header.Set("X-Shroud-Agent-Key", "malicious:attacker")
@@ -630,7 +630,7 @@ func TestProxyHandlerQueryParams(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := Config{ShroudURL: upstream.URL, AgentID: "agent-1", AgentAPIKey: "key-1"}
-	handler := proxyHandler(cfg, NewActivityTracker())
+	handler := proxyHandler(cfg, NewActivityTracker(), NewTokenManager("", "", "", "", ""))
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions?stream=true", strings.NewReader(`{}`))
 	w := httptest.NewRecorder()

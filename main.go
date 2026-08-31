@@ -67,7 +67,7 @@ func loadConfig() Config {
 		// default — never expose unauthenticated privileged ports on 0.0.0.0.
 		ListenAddr:      envOr("LISTEN_ADDR", "127.0.0.1:8080"),
 		InboundAddr:     envOr("INBOUND_ADDR", ":8081"),
-		ShroudURL:       strings.TrimRight(envOr("ONECLAW_SHROUD_URL", "https://shroud.1claw.xyz"), "/"),
+		ShroudURL:       strings.TrimRight(envOr("ONECLAW_SHROUD_URL", "https://shroud.1claw.co"), "/"),
 		BaseURL:         strings.TrimRight(envOr("ONECLAW_BASE_URL", "https://api.1claw.co"), "/"),
 		AgentID:         os.Getenv("ONECLAW_AGENT_ID"),
 		AgentAPIKey:     os.Getenv("ONECLAW_AGENT_API_KEY"),

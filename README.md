@@ -1,6 +1,6 @@
 # 1Claw Shroud Sidecar
 
-A lightweight HTTP proxy that routes LLM traffic through [1Claw Shroud](https://1claw.xyz) — the TEE-backed proxy that inspects prompts, redacts secrets, blocks prompt injection, and enforces per-agent policies. Drop it into any environment as a sidecar container or standalone binary.
+A lightweight HTTP proxy that routes LLM traffic through [1Claw Shroud](https://1claw.co) — the TEE-backed proxy that inspects prompts, redacts secrets, blocks prompt injection, and enforces per-agent policies. Drop it into any environment as a sidecar container or standalone binary.
 
 ## What it does
 
@@ -16,7 +16,7 @@ A lightweight HTTP proxy that routes LLM traffic through [1Claw Shroud](https://
 
 1. **Intercepts** LLM HTTP requests on `localhost:8080`
 2. **Injects** `X-Shroud-Agent-Key`, `X-Shroud-Provider`, and optional `X-Shroud-Model` headers
-3. **Forwards** to `https://shroud.1claw.xyz` where Shroud applies secret redaction, PII scrubbing, prompt injection defense, and per-agent policies inside a TEE
+3. **Forwards** to `https://shroud.1claw.co` where Shroud applies secret redaction, PII scrubbing, prompt injection defense, and per-agent policies inside a TEE
 4. **Emits** a JSON audit line per request to stdout (timestamp, agent, provider, model, tokens, latency, status)
 
 ## Why use a sidecar?
@@ -60,7 +60,7 @@ On first run you'll see:
 [bootstrap] Creating access policy (path: **)...
 [bootstrap] Policy created
 [bootstrap] State saved to ~/.1claw/shroud-sidecar-state.json
-1claw-shroud-sidecar listening on :8080 → https://shroud.1claw.xyz (agent e4f5a6b7...)
+1claw-shroud-sidecar listening on :8080 → https://shroud.1claw.co (agent e4f5a6b7...)
 ```
 
 Subsequent starts load from the state file — no API calls.
@@ -81,7 +81,7 @@ To also delete the vault, add `ONECLAW_AUTO_DESTROY_VAULT=true`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ONECLAW_MASTER_API_KEY` | — | Human `1ck_` API key (triggers bootstrap mode) |
-| `ONECLAW_BASE_URL` | `https://api.1claw.xyz` | 1Claw API base URL |
+| `ONECLAW_BASE_URL` | `https://api.1claw.co` | 1Claw API base URL |
 | `ONECLAW_VAULT_NAME` | `shroud-sidecar` | Name for the auto-created vault |
 | `ONECLAW_AGENT_NAME` | `shroud-sidecar-agent` | Name for the auto-created agent |
 | `ONECLAW_POLICY_PATH` | `**` | Secret path pattern for the access policy |
@@ -183,7 +183,7 @@ Run these **in order** for a full matrix: fast local checks first, then live API
 | Step | Command | Network | What it covers |
 |------|---------|---------|----------------|
 | 1 | `go test ./...` | No | Proxy handler, config parsing, audit JSON shape, teardown parsing (see `main_test.go`) |
-| 2 | `bash tests/test_integration.sh` | Yes (`api.1claw.xyz`, `shroud.1claw.xyz`) | Bootstrap, `/healthz`, state reuse, proxy to Shroud, BYOK header path, teardown no-op + full teardown, manual mode |
+| 2 | `bash tests/test_integration.sh` | Yes (`api.1claw.co`, `shroud.1claw.co`) | Bootstrap, `/healthz`, state reuse, proxy to Shroud, BYOK header path, teardown no-op + full teardown, manual mode |
 | 3 | `bash tests/test_security.sh` | Yes | Injection 403, benign vs injection, audit must not leak BYOK bearer; optional OpenAI completion + vault redaction when `OPENAI_API_KEY` is set |
 
 Build the binary before the shell scripts (they invoke `./shroud-sidecar` in the package directory):
@@ -269,7 +269,7 @@ Tune blocking thresholds, PII mode, and detectors in the 1Claw dashboard or API 
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ONECLAW_SHROUD_URL` | No | `https://shroud.1claw.xyz` | Shroud endpoint |
+| `ONECLAW_SHROUD_URL` | No | `https://shroud.1claw.co` | Shroud endpoint |
 | `ONECLAW_DEFAULT_PROVIDER` | No | auto-detect from path | Default LLM provider (`openai`, `anthropic`, `google`, etc.) |
 | `ONECLAW_DEFAULT_MODEL` | No | — | Default model name |
 | `ONECLAW_VAULT_ID` | No | — | Vault ID (for audit context; auto-set in bootstrap mode) |
@@ -355,7 +355,7 @@ At runtime it operates in one of two modes:
 
 ## How Shroud handles the request
 
-Once the sidecar forwards to `shroud.1claw.xyz`:
+Once the sidecar forwards to `shroud.1claw.co`:
 
 1. Shroud authenticates via `X-Shroud-Agent-Key` (exchanges for a short-lived JWT internally)
 2. Runs the **inspection pipeline** — secret redaction, PII detection, prompt injection scoring

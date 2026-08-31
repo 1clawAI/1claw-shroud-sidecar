@@ -460,7 +460,16 @@ func terminalCheckOrigin(r *http.Request) bool {
 		return true
 	}
 	// Exact matches (dashboard + local dev).
-	if origin == "https://1claw.xyz" ||
+	//
+	// Both domains. The dashboard moved to 1claw.co and this list did not, so
+	// the browser opened the terminal socket with Origin: https://1claw.co and
+	// the upgrade was refused — the interactive terminal simply did not work
+	// from the canonical domain. 1claw.xyz stays until it is retired.
+	if origin == "https://1claw.co" ||
+		origin == "http://1claw.co" ||
+		origin == "https://app.1claw.co" ||
+		origin == "http://app.1claw.co" ||
+		origin == "https://1claw.xyz" ||
 		origin == "http://1claw.xyz" ||
 		origin == "https://app.1claw.xyz" ||
 		origin == "http://app.1claw.xyz" {
@@ -468,6 +477,7 @@ func terminalCheckOrigin(r *http.Request) bool {
 	}
 	// Suffix allowlist: dashboard previews and 1claw subdomains (not WS hostnames).
 	suffixes := []string{
+		".1claw.co",
 		".1claw.xyz",
 		".vercel.app",
 	}
