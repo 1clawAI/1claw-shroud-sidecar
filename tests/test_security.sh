@@ -9,7 +9,7 @@
 #
 # Requirements
 # ------------
-# - Network access to https://shroud.1claw.xyz
+# - Network access to https://shroud.1claw.co
 # - ONECLAW_MASTER_API_KEY (1ck_) in env, or repo-root .env with ADMIN_EMAIL + ADMIN_PASSWORD
 #   (script mints a temporary 1ck_ key, same as test_integration.sh)
 #
@@ -59,7 +59,7 @@ cleanup() {
     echo "[cleanup] Revoking test API key $CLEANUP_KEY_ID..."
     curl -sf -X DELETE \
       -H "Authorization: Bearer $CLEANUP_JWT" \
-      "https://api.1claw.xyz/v1/auth/api-keys/$CLEANUP_KEY_ID" >/dev/null 2>&1 \
+      "https://api.1claw.co/v1/auth/api-keys/$CLEANUP_KEY_ID" >/dev/null 2>&1 \
       && echo "[cleanup] API key revoked" \
       || echo "[cleanup] WARNING: could not revoke API key"
   fi
@@ -83,11 +83,11 @@ load_master_key() {
     exit 1
   fi
   echo "[setup] Minting temporary 1ck_ API key..."
-  jwt=$(curl -sf -X POST https://api.1claw.xyz/v1/auth/token \
+  jwt=$(curl -sf -X POST https://api.1claw.co/v1/auth/token \
     -H "Content-Type: application/json" \
     -d "{\"email\": \"$admin_email\", \"password\": \"$admin_password\"}" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
-  key_resp=$(curl -sf -X POST https://api.1claw.xyz/v1/auth/api-keys \
+  key_resp=$(curl -sf -X POST https://api.1claw.co/v1/auth/api-keys \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $jwt" \
     -d '{"name": "shroud-sidecar-security-test"}')
@@ -156,7 +156,7 @@ agent_jwt_for_bootstrap_state() {
   local state_file="$1"
   STATE_FILE="$state_file" python3 <<'PY'
 import json, os, urllib.request
-base = os.environ.get("VAULT_API_URL", "https://api.1claw.xyz")
+base = os.environ.get("VAULT_API_URL", "https://api.1claw.co")
 with open(os.environ["STATE_FILE"]) as f:
     d = json.load(f)
 body = json.dumps({"agent_id": d["agent_id"], "api_key": d["agent_api_key"]}).encode()
@@ -193,7 +193,7 @@ test_vault_secret_redaction_e2e() {
   put_body=$(SECRET_VAL="$secret" python3 -c "import json,os; print(json.dumps({'type':'note','value':os.environ['SECRET_VAL']}))")
   # Path e2e/redaction-verify — manifest path label for [REDACTED:...] in Shroud
   put_code=$(curl -s -o /tmp/putsec-$$.json -w "%{http_code}" -X PUT \
-    "${VAULT_API_URL:-https://api.1claw.xyz}/v1/vaults/${vault_id}/secrets/e2e/redaction-verify" \
+    "${VAULT_API_URL:-https://api.1claw.co}/v1/vaults/${vault_id}/secrets/e2e/redaction-verify" \
     -H "Authorization: Bearer $jwt" \
     -H "Content-Type: application/json" \
     -d "$put_body")

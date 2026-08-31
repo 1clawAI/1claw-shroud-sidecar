@@ -202,7 +202,7 @@ func TestScratchLRU_NamespaceIsolation(t *testing.T) {
 // ============================================================
 
 func TestInboundAuth_Public(t *testing.T) {
-	auth := NewInboundAuth("public", "", "https://api.1claw.xyz")
+	auth := NewInboundAuth("public", "", "https://api.1claw.co")
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	ok, reason := auth.Authenticate(req)
@@ -214,7 +214,7 @@ func TestInboundAuth_Public(t *testing.T) {
 func TestInboundAuth_APIKey_Valid(t *testing.T) {
 	key := "rk_test_secret_key_12345"
 	hash := HashAPIKey(key)
-	auth := NewInboundAuth("api_key", hash, "https://api.1claw.xyz")
+	auth := NewInboundAuth("api_key", hash, "https://api.1claw.co")
 
 	// Via Authorization header
 	req := httptest.NewRequest("GET", "/test", nil)
@@ -235,7 +235,7 @@ func TestInboundAuth_APIKey_Valid(t *testing.T) {
 
 func TestInboundAuth_APIKey_Invalid(t *testing.T) {
 	hash := HashAPIKey("correct_key")
-	auth := NewInboundAuth("api_key", hash, "https://api.1claw.xyz")
+	auth := NewInboundAuth("api_key", hash, "https://api.1claw.co")
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("Authorization", "Bearer wrong_key")
@@ -247,7 +247,7 @@ func TestInboundAuth_APIKey_Invalid(t *testing.T) {
 
 func TestInboundAuth_APIKey_Missing(t *testing.T) {
 	hash := HashAPIKey("some_key")
-	auth := NewInboundAuth("api_key", hash, "https://api.1claw.xyz")
+	auth := NewInboundAuth("api_key", hash, "https://api.1claw.co")
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	ok, reason := auth.Authenticate(req)
@@ -260,7 +260,7 @@ func TestInboundAuth_APIKey_Missing(t *testing.T) {
 }
 
 func TestInboundAuth_APIKey_EmptyHashFailsClosed(t *testing.T) {
-	auth := NewInboundAuth("api_key", "", "https://api.1claw.xyz")
+	auth := NewInboundAuth("api_key", "", "https://api.1claw.co")
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("Authorization", "Bearer any_key")
@@ -274,7 +274,7 @@ func TestInboundAuth_APIKey_EmptyHashFailsClosed(t *testing.T) {
 }
 
 func TestInboundAuth_JWT_RejectsUnsigned(t *testing.T) {
-	auth := NewInboundAuth("jwt", "", "https://api.1claw.xyz")
+	auth := NewInboundAuth("jwt", "", "https://api.1claw.co")
 	// Inject empty cache that will fail refresh (fail-closed).
 	auth.jwksCache = &JWKSCache{
 		keys:   map[string]*rsa.PublicKey{},
@@ -307,11 +307,11 @@ func TestInboundAuth_JWT_ValidSigned(t *testing.T) {
 		url:       "inline",
 		client:    &http.Client{},
 	}
-	auth := NewInboundAuth("jwt", "", "https://api.1claw.xyz").WithJWKSCache(cache)
+	auth := NewInboundAuth("jwt", "", "https://api.1claw.co").WithJWKSCache(cache)
 
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"test"}`))
 	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(
-		`{"sub":"user:test","exp":%d,"iss":"https://api.1claw.xyz"}`,
+		`{"sub":"user:test","exp":%d,"iss":"https://api.1claw.co"}`,
 		time.Now().Add(time.Hour).Unix(),
 	)))
 	signingInput := header + "." + payload
@@ -331,7 +331,7 @@ func TestInboundAuth_JWT_ValidSigned(t *testing.T) {
 }
 
 func TestInboundAuth_JWT_Invalid(t *testing.T) {
-	auth := NewInboundAuth("jwt", "", "https://api.1claw.xyz")
+	auth := NewInboundAuth("jwt", "", "https://api.1claw.co")
 
 	// Missing Bearer
 	req := httptest.NewRequest("GET", "/test", nil)

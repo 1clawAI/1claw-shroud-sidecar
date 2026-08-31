@@ -51,7 +51,7 @@ cleanup() {
     echo "[cleanup] Revoking test API key $CLEANUP_KEY_ID..."
     curl -sf -X DELETE \
       -H "Authorization: Bearer $CLEANUP_JWT" \
-      "https://api.1claw.xyz/v1/auth/api-keys/$CLEANUP_KEY_ID" >/dev/null 2>&1 \
+      "https://api.1claw.co/v1/auth/api-keys/$CLEANUP_KEY_ID" >/dev/null 2>&1 \
       && echo "[cleanup] API key revoked" \
       || echo "[cleanup] WARNING: Could not revoke API key"
   fi
@@ -79,12 +79,12 @@ load_master_key() {
   fi
 
   echo "[setup] Authenticating as $admin_email to create test API key..."
-  jwt=$(curl -sf -X POST https://api.1claw.xyz/v1/auth/token \
+  jwt=$(curl -sf -X POST https://api.1claw.co/v1/auth/token \
     -H "Content-Type: application/json" \
     -d "{\"email\": \"$admin_email\", \"password\": \"$admin_password\"}" \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
 
-  key_resp=$(curl -sf -X POST https://api.1claw.xyz/v1/auth/api-keys \
+  key_resp=$(curl -sf -X POST https://api.1claw.co/v1/auth/api-keys \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer $jwt" \
     -d '{"name": "shroud-sidecar-integration-test"}')
