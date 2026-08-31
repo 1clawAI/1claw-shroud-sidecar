@@ -354,7 +354,7 @@ func TestLoadBootstrapConfigDefaults(t *testing.T) {
 	if cfg.MasterAPIKey != "1ck_test" {
 		t.Errorf("MasterAPIKey = %q", cfg.MasterAPIKey)
 	}
-	if cfg.BaseURL != "https://api.1claw.xyz" {
+	if cfg.BaseURL != "https://api.1claw.co" {
 		t.Errorf("BaseURL = %q", cfg.BaseURL)
 	}
 	if cfg.VaultName != "shroud-sidecar" {

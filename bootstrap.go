@@ -48,7 +48,7 @@ func loadBootstrapConfig() *BootstrapConfig {
 
 	return &BootstrapConfig{
 		MasterAPIKey: masterKey,
-		BaseURL:      strings.TrimRight(envOr("ONECLAW_BASE_URL", "https://api.1claw.xyz"), "/"),
+		BaseURL:      strings.TrimRight(envOr("ONECLAW_BASE_URL", "https://api.1claw.co"), "/"),
 		VaultName:    envOr("ONECLAW_VAULT_NAME", "shroud-sidecar"),
 		AgentName:    envOr("ONECLAW_AGENT_NAME", "shroud-sidecar-agent"),
 		// Least privilege: default to read-only on a narrow prefix. Opt into
