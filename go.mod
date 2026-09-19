@@ -6,3 +6,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/gorilla/websocket v1.5.3
 )
+
+require github.com/tetratelabs/wazero v1.9.0
+
+require golang.org/x/crypto v0.37.0

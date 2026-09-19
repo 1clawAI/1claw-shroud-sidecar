@@ -381,3 +381,24 @@ This sidecar is a transparent proxy; no version bump required unless bootstrap A
 ## License
 
 Apache-2.0
+
+## Threshold-key share holder (`/tss/*`)
+
+The sidecar can hold the customer's half of a 2-of-2 FROST (Ed25519) treasury
+key so the agent can sign below-cap sends unattended. At boot it generates a
+P-256 key and registers the public half with the vault
+(`POST /v1/runtimes/{id}/tss/holder`); the owner then provisions a share from
+the dashboard (Treasury → wallet → *Runtime signing*), which arrives ECIES-wrapped
+to that key. The private half never leaves the process; a share is decrypted
+per signing and zeroed.
+
+The protocol is the same Rust crate the browser uses (`packages/tss-wasm`,
+C-ABI build embedded at `tss/oneclaw_tss_cabi.wasm`) executed with wazero.
+
+| Endpoint (loopback) | Body | What happens |
+|---|---|---|
+| `POST /tss/send` | `{key_id, to, value, memo?}` | `prepare` (guardrails + sanctions, vault builds the message) → fetch + unwrap share → FROST rounds with the vault → `broadcast` |
+| `POST /tss/sign` | `{key_id, message}` (base64) | co-sign a message the agent already prepared |
+
+Requires `ONECLAW_RUNTIME_ID`. Without a provisioned share the vault answers
+403 and the sidecar relays it.

@@ -169,6 +169,17 @@ func main() {
 	mux.Handle("/intents", intentsHandler)
 
 	// Execution proxy
+	// Runtime share holder: the agent's half of a threshold key, so a
+	// below-cap send can be signed unattended (see tss.go).
+	if engine, err := NewTssEngine(context.Background()); err != nil {
+		log.Printf("tss: engine unavailable (%v); /tss endpoints disabled", err)
+	} else if holder, err := NewShareHolder(tm, cfg.BaseURL, cfg.AgentID, cfg.RuntimeID, engine, activity); err != nil {
+		log.Printf("tss: holder key generation failed (%v); /tss endpoints disabled", err)
+	} else {
+		mux.Handle("/tss/", holder)
+		go holder.Register(context.Background())
+	}
+
 	execHandler := NewExecuteHandler(tm, cfg.BaseURL, cfg.AgentID, activity)
 	mux.Handle("/execute/", execHandler)
 	mux.Handle("/execute", execHandler)
