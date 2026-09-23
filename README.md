@@ -1,6 +1,6 @@
 # 1Claw Shroud Sidecar
 
-A lightweight HTTP proxy that routes LLM traffic through [1Claw Shroud](https://1claw.co) — the TEE-backed proxy that inspects prompts, redacts secrets, blocks prompt injection, and enforces per-agent policies. Drop it into any environment as a sidecar container or standalone binary.
+An HTTP + WebSocket gateway for a tenant runtime: routes LLM traffic through [1Claw Shroud](https://1claw.co) — the TEE-backed proxy that inspects prompts, redacts secrets, blocks prompt injection, and enforces per-agent policies — and also proxies the agent's memory, execution-intents, and tool-execution calls to Vault, plus an interactive terminal over WebSocket. Drop it into any environment as a sidecar container or standalone binary.
 
 ## What it does
 
@@ -377,6 +377,22 @@ Shroud (upstream of this sidecar) adds **v0.56** guardrail governance:
 - **Graduated HITL** — High-risk agent transactions route to approval queue (dashboard/mobile).
 
 This sidecar is a transparent proxy; no version bump required unless bootstrap API shapes change.
+
+## Inbound proxy endpoints
+
+Beyond the `/` catch-all LLM proxy above, the same `:8080` mux always serves
+four more endpoints — no flag required, all mounted at startup (`main.go`):
+
+| Path | Handler | What it does |
+|------|---------|--------------|
+| `/memory`, `/memory/` | `MemoryHandler` (`memory.go`) | Proxies the agent's memory API to Vault — list/get/put/delete a key, and search — through a scratch LRU cache. |
+| `/intents`, `/intents/` | `IntentsHandler` (`intents.go`) | Proxies Intents API calls to Vault or Shroud. |
+| `/execute`, `/execute/` | `ExecuteHandler` (`execute.go`) | Proxies Execution Intents API calls to Vault. |
+| `/terminal` | `TerminalHandler` (`terminal.go`) | Interactive PTY session over WebSocket, authenticated against a short-lived shell-session JWT (validated via `ONECLAW_JWKS_URL`, default `https://api.1claw.co/.well-known/jwks.json`). Session limits: `SHELL_MAX_SESSIONS` (default 2), `SHELL_MAX_SESSION_MINUTES` (default 30), `SHELL_IDLE_TIMEOUT_MINUTES` (default 10). |
+
+All four authenticate the same way as the LLM proxy (the sidecar's own agent
+credentials via `TokenManager`), not the caller — a process inside the
+runtime container talks to `localhost:8080`, not to Vault directly.
 
 ## License
 
