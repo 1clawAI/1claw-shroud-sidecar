@@ -188,15 +188,23 @@ func main() {
 	shellMaxMin, _ := strconv.Atoi(envOr("SHELL_MAX_SESSION_MINUTES", "30"))
 	shellIdleMin, _ := strconv.Atoi(envOr("SHELL_IDLE_TIMEOUT_MINUTES", "10"))
 	shellMaxSessions, _ := strconv.Atoi(envOr("SHELL_MAX_SESSIONS", "2"))
+	jwksURL := envOr("ONECLAW_JWKS_URL", "https://api.1claw.co/.well-known/jwks.json")
 	termHandler := &TerminalHandler{
 		maxSessions:    shellMaxSessions,
 		sessionTimeout: time.Duration(shellMaxMin) * time.Minute,
 		idleTimeout:    time.Duration(shellIdleMin) * time.Minute,
-		jwksURL:        envOr("ONECLAW_JWKS_URL", "https://api.1claw.co/.well-known/jwks.json"),
-		jwksCache:      NewJWKSCache(envOr("ONECLAW_JWKS_URL", "https://api.1claw.co/.well-known/jwks.json"), 5*time.Minute),
+		jwksURL:        jwksURL,
+		jwksCache:      NewJWKSCache(jwksURL, 5*time.Minute),
 		runtimeID:      cfg.RuntimeID,
 		ptyRegistry:    newPtyRegistry(),
 	}
+	go func() {
+		if err := termHandler.jwksCache.refresh(); err != nil {
+			log.Printf("[jwks] initial fetch failed (chat will retry): %v", err)
+		} else {
+			log.Printf("[jwks] initial fetch ok (%s)", jwksURL)
+		}
+	}()
 	mux.Handle("/terminal", termHandler)
 
 	// Existing LLM proxy (catch-all)
@@ -267,7 +275,6 @@ func main() {
 	if cfg.AgentID != "" {
 		agentLabel = cfg.AgentID[:min(8, len(cfg.AgentID))] + "..."
 	}
-	jwksURL := envOr("ONECLAW_JWKS_URL", cfg.BaseURL+"/.well-known/jwks.json")
 	runtimeLabel := cfg.RuntimeID
 	if runtimeLabel == "" {
 		runtimeLabel = "(unset — runtime-chat JWT validation will fail; Stop then Start the runtime)"

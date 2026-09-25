@@ -80,14 +80,57 @@ type terminalMessage struct {
 	Rows uint16 `json:"rows"`
 }
 
+const jwksFetchTimeout = 20 * time.Second
+const jwksErrorBackoff = 30 * time.Second
+
 func NewJWKSCache(url string, ttl time.Duration) *JWKSCache {
 	return &JWKSCache{
 		keys:   make(map[string]*rsa.PublicKey),
 		edKeys: make(map[string]ed25519.PublicKey),
 		url:    url,
 		ttl:    ttl,
-		client: &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{Timeout: jwksFetchTimeout},
 	}
+}
+
+func (c *JWKSCache) candidateURLs() []string {
+	urls := []string{c.url}
+	if fb := strings.TrimSpace(os.Getenv("ONECLAW_VAULT_INTERNAL_URL")); fb != "" {
+		fb = strings.TrimRight(fb, "/") + "/.well-known/jwks.json"
+		if fb != c.url {
+			urls = append(urls, fb)
+		}
+	}
+	return urls
+}
+
+func (c *JWKSCache) fetchBody() ([]byte, error) {
+	var lastErr error
+	for _, u := range c.candidateURLs() {
+		for attempt := 0; attempt < 2; attempt++ {
+			resp, err := c.client.Get(u)
+			if err != nil {
+				lastErr = err
+				time.Sleep(400 * time.Millisecond)
+				continue
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if resp.StatusCode != http.StatusOK {
+				lastErr = fmt.Errorf("jwks fetch HTTP %d", resp.StatusCode)
+				continue
+			}
+			return body, nil
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("jwks fetch failed")
 }
 
 func (c *JWKSCache) hasAnyKeysLocked() bool {
@@ -175,19 +218,17 @@ func (c *JWKSCache) refresh() error {
 		return nil
 	}
 
-	resp, err := c.client.Get(c.url)
+	body, err := c.fetchBody()
 	if err != nil {
+		if c.hasAnyKeysLocked() {
+			// Hairpin timeouts to api.1claw.co used to fail-closed every
+			// runtime-chat request once the 5-minute TTL expired. Keep
+			// serving the last good keys and retry after a short backoff.
+			log.Printf("[jwks] refresh failed, serving stale keys: %v", err)
+			c.fetchedAt = time.Now().Add(-c.ttl + jwksErrorBackoff)
+			return nil
+		}
 		return fmt.Errorf("jwks fetch failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("jwks fetch HTTP %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("jwks read body: %w", err)
 	}
 
 	var jwks jwksResponse

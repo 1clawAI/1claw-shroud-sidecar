@@ -871,3 +871,27 @@ func TestHashAPIKey(t *testing.T) {
 		t.Errorf("SHA-256 hex should be 64 chars, got %d", len(hash1))
 	}
 }
+
+func TestJWKSCache_ServesStaleKeysWhenRefreshFails(t *testing.T) {
+	// After the 5-minute TTL a hairpinned fetch to api.1claw.co used to
+	// fail-closed every runtime-chat request. Keep the last good keys.
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := &JWKSCache{
+		keys:      map[string]*rsa.PublicKey{"test": &priv.PublicKey},
+		edKeys:    map[string]ed25519.PublicKey{},
+		fetchedAt: time.Now().Add(-2 * time.Hour),
+		ttl:       time.Minute,
+		url:       "http://127.0.0.1:1/jwks",
+		client:    &http.Client{Timeout: 50 * time.Millisecond},
+	}
+	got, err := cache.GetKeyByKid("test")
+	if err != nil {
+		t.Fatalf("stale key must still be served when refresh fails: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected cached RSA key")
+	}
+}
