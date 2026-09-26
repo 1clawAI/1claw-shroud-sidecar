@@ -46,6 +46,19 @@ type JWKSCache struct {
 	ttl       time.Duration
 	url       string
 	client    *http.Client
+
+	// JWKSLOCK-L1: serialises fetches without holding `mu`. The old refresh
+	// held the write lock across the whole network call — with a fallback URL
+	// and two attempts each at a 20s timeout, that is up to ~80s during which
+	// every chat and terminal JWT check blocks. Which defeated the point of
+	// the stale-serving behaviour it was added alongside: the keys were there
+	// to be served, and nobody could read them.
+	fetchMu sync.Mutex
+
+	// When the keys were last *successfully* fetched. Distinct from
+	// `fetchedAt`, which the error path rewinds to schedule a retry and so
+	// cannot answer "how old is this material really?".
+	lastGoodAt time.Time
 }
 
 type jwksResponse struct {
@@ -83,6 +96,16 @@ type terminalMessage struct {
 const jwksFetchTimeout = 20 * time.Second
 const jwksErrorBackoff = 30 * time.Second
 
+// Stop trusting keys that have not been re-fetched in this long. Serving
+// stale keys through a short outage is deliberate; serving them indefinitely
+// means a key removed from the JWKS (revoked, rotated out) keeps verifying
+// tokens for as long as the fetch keeps failing.
+const jwksMaxStale = 1 * time.Hour
+
+// A JWKS document is a handful of public keys. Anything larger is a
+// misconfigured endpoint or a hostile one, and `io.ReadAll` was unbounded.
+const jwksMaxBytes = 1 << 20
+
 func NewJWKSCache(url string, ttl time.Duration) *JWKSCache {
 	return &JWKSCache{
 		keys:   make(map[string]*rsa.PublicKey),
@@ -114,7 +137,7 @@ func (c *JWKSCache) fetchBody() ([]byte, error) {
 				time.Sleep(400 * time.Millisecond)
 				continue
 			}
-			body, err := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(io.LimitReader(resp.Body, jwksMaxBytes))
 			resp.Body.Close()
 			if err != nil {
 				lastErr = err
@@ -210,21 +233,48 @@ func (c *JWKSCache) GetEdKeyByKid(kid string) (ed25519.PublicKey, error) {
 	return nil, fmt.Errorf("no suitable EdDSA key found in JWKS")
 }
 
-func (c *JWKSCache) refresh() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// fresh reports whether the cache can be used without a network call.
+func (c *JWKSCache) fresh() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.hasAnyKeysLocked() && time.Since(c.fetchedAt) < c.ttl
+}
 
-	if c.hasAnyKeysLocked() && time.Since(c.fetchedAt) < c.ttl {
+func (c *JWKSCache) refresh() error {
+	if c.fresh() {
+		return nil
+	}
+
+	// JWKSLOCK-L1: `fetchMu` serialises fetches so a burst of requests
+	// arriving at TTL expiry makes one request rather than one per
+	// connection — but `mu` is *not* held across the network call, so every
+	// concurrent JWT check keeps reading the cached keys throughout.
+	c.fetchMu.Lock()
+	defer c.fetchMu.Unlock()
+
+	// Another goroutine may have refreshed while this one waited for fetchMu.
+	if c.fresh() {
 		return nil
 	}
 
 	body, err := c.fetchBody()
 	if err != nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		if c.hasAnyKeysLocked() {
+			staleFor := time.Since(c.lastGoodAt)
+			if !c.lastGoodAt.IsZero() && staleFor > jwksMaxStale {
+				// Past this point the material is old enough that a key
+				// removed upstream could still be verifying tokens here.
+				log.Printf("[jwks] refresh failing for %v (> %v); refusing to serve stale keys: %v",
+					staleFor.Truncate(time.Second), jwksMaxStale, err)
+				return fmt.Errorf("jwks unavailable for %v: %w", staleFor.Truncate(time.Second), err)
+			}
 			// Hairpin timeouts to api.1claw.co used to fail-closed every
 			// runtime-chat request once the 5-minute TTL expired. Keep
 			// serving the last good keys and retry after a short backoff.
-			log.Printf("[jwks] refresh failed, serving stale keys: %v", err)
+			log.Printf("[jwks] refresh failed, serving stale keys (age %v): %v",
+				staleFor.Truncate(time.Second), err)
 			c.fetchedAt = time.Now().Add(-c.ttl + jwksErrorBackoff)
 			return nil
 		}
@@ -276,9 +326,14 @@ func (c *JWKSCache) refresh() error {
 		return fmt.Errorf("no suitable RS256/EdDSA keys found in JWKS")
 	}
 
+	// Parsing happened outside the lock; only the swap needs it.
+	now := time.Now()
+	c.mu.Lock()
 	c.keys = keys
 	c.edKeys = edKeys
-	c.fetchedAt = time.Now()
+	c.fetchedAt = now
+	c.lastGoodAt = now
+	c.mu.Unlock()
 	return nil
 }
 
