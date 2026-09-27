@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -68,14 +70,86 @@ func (tm *TokenManager) GetToken() (string, error) {
 		if tok != "" && !expired {
 			return tok, nil
 		}
-		// Runtime JWTs are minted at start; refresh requires Vault/chat to push a new one.
 		if tok != "" {
+			// The runtime JWT is on its way out. Renew it rather than handing
+			// back something that will 401.
+			//
+			// This used to return the expired token with a comment saying a
+			// refresh "requires Vault/chat to push a new one" — so every
+			// sidecar-served call the agent made (memory, intents, execute,
+			// secrets) failed about two hours into a runtime's life unless
+			// somebody happened to use dashboard chat, whose proxy pushes a
+			// fresh token. The user's only remedy was to restart the runtime.
+			if renewed, err := tm.renewRuntimeToken(tok); err == nil {
+				return renewed, nil
+			} else {
+				// Still hand back what we have: it may have seconds left, and
+				// a stale token that might work beats no token at all.
+				log.Printf("[token] runtime JWT renewal failed, using the existing token: %v", err)
+			}
 			return tok, nil
 		}
 		return "", fmt.Errorf("agent JWT not available")
 	}
 
 	return tm.refresh()
+}
+
+// renewRuntimeToken swaps a still-valid runtime-bound agent JWT for a fresh one.
+//
+// Authenticated by the token being replaced: Vault has already checked its
+// signature and revocation, and requires X-1Claw-Runtime-Id to match the
+// runtime it is bound to. It grants nothing new — the same claims with a later
+// expiry — so no long-lived credential is introduced into the container.
+func (tm *TokenManager) renewRuntimeToken(current string) (string, error) {
+	if tm.runtimeID == "" {
+		return "", fmt.Errorf("no runtime id: this sidecar cannot renew its own token")
+	}
+	if tm.baseURL == "" {
+		return "", fmt.Errorf("no vault base URL configured")
+	}
+
+	url := fmt.Sprintf("%s/v1/runtimes/%s/agent-token/renew",
+		strings.TrimRight(tm.baseURL, "/"), tm.runtimeID)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+current)
+	req.Header.Set("X-1Claw-Runtime-Id", tm.runtimeID)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := tm.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("renew request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode/100 != 2 {
+		return "", fmt.Errorf("renew HTTP %d: %s", resp.StatusCode, string(data))
+	}
+
+	var result struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("renew parse: %w", err)
+	}
+	if result.AccessToken == "" {
+		return "", fmt.Errorf("renew returned no token")
+	}
+
+	tm.mu.Lock()
+	tm.token = result.AccessToken
+	tm.staticJWT = true
+	if result.ExpiresIn > 0 {
+		tm.expiry = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
+	} else {
+		tm.expiry = jwtExpiryFromToken(result.AccessToken)
+	}
+	tm.mu.Unlock()
+	return result.AccessToken, nil
 }
 
 func (tm *TokenManager) refresh() (string, error) {
