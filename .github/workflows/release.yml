@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
   packages: write
+  # Trusted Publishing (OIDC) for the npm step below. The monorepo's eight
+  # publish workflows authenticate this way and hold no npm token; this one
+  # has to match, or it is the only long-lived publish credential we own.
+  id-token: write
 
 env:
   BINARY_NAME: shroud-sidecar
@@ -96,6 +100,16 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Use an npm that supports Trusted Publishing
+        run: |
+          # Pinned exactly, not @latest or a range, and bumped deliberately in
+          # one commit across every publish workflow. This runs in a job holding
+          # id-token: write immediately before publishing public packages, so
+          # whatever this resolves to executes with the credential that
+          # publishes them.
+          npm install -g npm@11.5.1
+          npm --version
+
       - name: Stage platform packages
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -123,9 +137,31 @@ jobs:
             test -x "npm/$d/bin/${BINARY_NAME}" || { echo "npm/$d has no executable binary"; exit 1; }
           done
 
+      # Auth, in the shape the monorepo's publish workflows settled on.
+      #
+      # Steady state is Trusted Publishing (OIDC) and no token at all. But OIDC
+      # cannot perform a package's *first* publish: there is no package yet for
+      # a trusted publisher to be configured against. So a first release needs
+      # a token, and only a first release.
+      #
+      # The secret is named for this package rather than given the generic name,
+      # so it cannot be picked up by — or copy-pasted into — a workflow that is
+      # working without one. (Spelled out rather than quoted here: a comment
+      # holding the generic name is a false hit for anyone grepping the
+      # workflows for which credentials they reference.)
+      #
+      # An earlier version of this step used that generic name, which exists in
+      # neither this repository nor the monorepo, and set it as
+      # `NODE_AUTH_TOKEN` unconditionally — an empty token suppresses OIDC, and
+      # npm answers a failed auth on a scoped package with 404, which reads as
+      # a missing package.
+      #
+      # **Delete the secret once both names exist on npm and Trusted Publishing
+      # is configured for them.** A long-lived publish token is what OIDC exists
+      # to remove, and npm is actively revoking the 2FA-bypassing ones.
       - name: Publish platform packages
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          FIRST_PUBLISH_TOKEN: ${{ secrets.NPM_TOKEN_SHROUD_SIDECAR }}
         run: |
           set -euo pipefail
           for d in linux-x64 darwin-arm64; do
@@ -133,8 +169,18 @@ jobs:
             version=$(node -p "require('./npm/$d/package.json').version")
             if npm view "$name@$version" version >/dev/null 2>&1; then
               echo "$name@$version already published; nothing to do."
-            else
+            elif npm view "$name" name >/dev/null 2>&1; then
+              # The name exists, so OIDC can publish a new version of it.
               npm publish "./npm/$d" --access public
+            elif [ -n "${FIRST_PUBLISH_TOKEN:-}" ]; then
+              echo "$name is new on npm — first publish with NPM_TOKEN_SHROUD_SIDECAR"
+              NODE_AUTH_TOKEN="$FIRST_PUBLISH_TOKEN" npm publish "./npm/$d" --access public
+            else
+              # A warning, not a failure: the tarballs, the GHCR image and the
+              # GitHub release are all still worth producing, and Hermes lists
+              # these packages as *optional* dependencies precisely so a missing
+              # one degrades to the PATH lookup instead of breaking installs.
+              echo "::warning::$name does not exist on npm yet and NPM_TOKEN_SHROUD_SIDECAR is not set — add a granular npm token with publish rights for @1claw as that secret in this repository and re-run. Until then Hermes falls back to a binary on PATH."
             fi
           done
 
