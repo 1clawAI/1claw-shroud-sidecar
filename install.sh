@@ -46,7 +46,14 @@ detect_suffix
 
 VERSION="${SHROUD_SIDECAR_VERSION:-}"
 if [ -z "$VERSION" ]; then
+  # Resolving "latest" is the right default for someone who typed this command
+  # themselves, which is the only caller left: Hermes no longer runs this, and
+  # the reason it stopped was that it resolved latest *implicitly*, inside
+  # another tool's install, so two installs a week apart silently produced
+  # different binaries. Here the request is explicit. What was missing is any
+  # way to repeat it, so say what it resolved to and how to pin it.
   VERSION=$(latest_tag)
+  RESOLVED_LATEST=1
 fi
 
 asset="${BINARY_NAME}_${asset_suffix}.tar.gz"
@@ -105,6 +112,9 @@ fi
 ver_out=$("$PREFIX/${BINARY_NAME}" --version 2>/dev/null || echo "?")
 echo "shroud-sidecar: installed ($ver_out)"
 echo "shroud-sidecar: -> $PREFIX/${BINARY_NAME}"
+if [ "${RESOLVED_LATEST:-0}" = "1" ]; then
+  echo "shroud-sidecar: resolved 'latest' to ${VERSION}; to repeat this exact install, set SHROUD_SIDECAR_VERSION=${VERSION}"
+fi
 case ":${PATH}:" in
   *":$PREFIX:"*) ;;
   *) echo "shroud-sidecar: add to PATH: export PATH=\"$PREFIX:\$PATH\"" >&2 ;;
