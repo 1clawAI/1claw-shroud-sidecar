@@ -82,6 +82,62 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
+      # One npm package per target, carrying only that platform's binary.
+      #
+      # Hermes depends on both under optionalDependencies and npm installs the
+      # one matching the host, so the version is pinned by Hermes' lockfile and
+      # npm verifies the tarball against the integrity hash recorded there.
+      # Nothing has to run a shell or reach GitHub at install time.
+      #
+      # Built from the same `dist/` this job already produced, so a published
+      # package version can only contain a binary built from this tag.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Stage platform packages
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The tag is vX.Y.Z; npm wants X.Y.Z.
+          NPM_VERSION="${VERSION#v}"
+          stage() {
+            local dir="$1" suffix="$2"
+            install -m 0755 "dist/${BINARY_NAME}_${suffix}/${BINARY_NAME}" "npm/${dir}/bin/${BINARY_NAME}"
+            rm -f "npm/${dir}/bin/.gitkeep"
+            node -e '
+              const fs = require("fs");
+              const p = process.argv[1], v = process.argv[2];
+              const j = JSON.parse(fs.readFileSync(p, "utf8"));
+              j.version = v;
+              fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+            ' "npm/${dir}/package.json" "$NPM_VERSION"
+          }
+          stage linux-x64 linux_amd64
+          stage darwin-arm64 darwin_arm64
+          # The binary must be present and executable, or we would publish an
+          # empty package that resolves and then fails at spawn.
+          for d in linux-x64 darwin-arm64; do
+            test -x "npm/$d/bin/${BINARY_NAME}" || { echo "npm/$d has no executable binary"; exit 1; }
+          done
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for d in linux-x64 darwin-arm64; do
+            name=$(node -p "require('./npm/$d/package.json').name")
+            version=$(node -p "require('./npm/$d/package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version already published; nothing to do."
+            else
+              npm publish "./npm/$d" --access public
+            fi
+          done
+
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:

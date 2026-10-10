@@ -1,5 +1,10 @@
 #!/usr/bin/env sh
 # Install shroud-sidecar from GitHub Releases (linux-amd64 / darwin-arm64 only).
+#
+# Note: @1claw/hermes no longer calls this. It depends on the per-platform npm
+# packages (@1claw/shroud-sidecar-{linux-x64,darwin-arm64}) so the version is
+# pinned by its lockfile and npm verifies the tarball. This script remains for
+# installing the binary by hand, outside a Node project.
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/1clawAI/1claw-shroud-sidecar/v1.0.0/install.sh | sh
 # Or pin version:
@@ -57,15 +62,30 @@ trap 'rm -rf "$tmpd"' EXIT
 echo "shroud-sidecar: fetching ${VERSION} ($asset) ..."
 curl -fsSL "$url" -o "$tmpd/$asset"
 
-if curl -fsSL "$sumurl" -o "$tmpd/checksums.txt" 2>/dev/null; then
-  cd "$tmpd"
-  if command -v sha256sum >/dev/null 2>&1; then
-    grep "$asset" checksums.txt | sha256sum -c
-  else
-    grep "$asset" checksums.txt | shasum -a 256 -c
-  fi
+# Verification is mandatory.
+#
+# This used to warn and continue when checksums.txt could not be fetched, which
+# meant anyone able to serve the tarball while withholding one file — or a
+# GitHub blip — downgraded the install to no verification at all, silently. An
+# integrity check that can be skipped by omitting a file is not an integrity
+# check.
+if ! curl -fsSL "$sumurl" -o "$tmpd/checksums.txt"; then
+  echo "shroud-sidecar: could not fetch ${sumurl} — refusing to install an unverified binary" >&2
+  exit 1
+fi
+
+cd "$tmpd"
+if ! grep -q "$asset" checksums.txt; then
+  echo "shroud-sidecar: ${asset} is not listed in checksums.txt — refusing to install" >&2
+  exit 1
+fi
+if command -v sha256sum >/dev/null 2>&1; then
+  grep "$asset" checksums.txt | sha256sum -c
+elif command -v shasum >/dev/null 2>&1; then
+  grep "$asset" checksums.txt | shasum -a 256 -c
 else
-  echo "shroud-sidecar: warning: checksums.txt not found; skipping checksum verify" >&2
+  echo "shroud-sidecar: no sha256sum or shasum available — cannot verify, refusing to install" >&2
+  exit 1
 fi
 
 tar -xzf "$tmpd/$asset" -C "$tmpd"

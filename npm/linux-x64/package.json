@@ -1,0 +1,17 @@
+{
+  "name": "@1claw/shroud-sidecar-linux-x64",
+  "version": "0.0.0",
+  "description": "shroud-sidecar binary for linux/x64. Installed automatically as an optional dependency of @1claw/hermes; not useful on its own.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1clawAI/1claw-shroud-sidecar.git",
+    "directory": "npm/linux-x64"
+  },
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["bin/shroud-sidecar"],
+  "publishConfig": {
+    "access": "public"
+  }
+}
