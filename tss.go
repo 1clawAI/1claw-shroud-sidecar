@@ -208,6 +208,11 @@ func (h *ShareHolder) coSign(ctx context.Context, keyID string, message []byte) 
 	var begin struct {
 		SessionID         string `json:"session_id"`
 		ServerCommitments string `json:"server_commitments"`
+		// The wallet's chain and address, so the payload rule is known, and
+		// the vault's own derivation of the payload, for comparison only.
+		Chain          string `json:"chain"`
+		WalletAddress  string `json:"wallet_address"`
+		SigningPayload string `json:"signing_payload"`
 	}
 	if _, err := h.api(ctx, http.MethodPost, fmt.Sprintf("/v1/agents/%s/tss/sign/begin", h.agentID), map[string]string{
 		"key_id":  keyID,
@@ -219,12 +224,25 @@ func (h *ShareHolder) coSign(ctx context.Context, keyID string, message []byte) 
 	if err != nil {
 		return nil, errors.New("tss: server commitments are not base64")
 	}
+	// Derive what we sign ourselves; refuse if the vault would aggregate over
+	// anything else. A vault older than this field signs the message itself,
+	// which is the payload on Solana, the only chain it served agents.
+	payload := message
+	if begin.Chain != "" {
+		payload, err = h.engine.CheckTransaction(ctx, begin.Chain, begin.WalletAddress, message)
+		if err != nil {
+			return nil, err
+		}
+		if begin.SigningPayload != "" && begin.SigningPayload != base64.StdEncoding.EncodeToString(payload) {
+			return nil, errors.New("tss: the vault would sign different bytes from this transaction; refusing")
+		}
+	}
 	nonces, commit, err := h.engine.SignRound1(ctx, share)
 	if err != nil {
 		return nil, err
 	}
 	defer zero(nonces)
-	sigShare, err := h.engine.SignRound2(ctx, tssClientID, share, nonces, commit, tssServerID, serverCommit, message)
+	sigShare, err := h.engine.SignRound2(ctx, tssClientID, share, nonces, commit, tssServerID, serverCommit, payload)
 	if err != nil {
 		return nil, err
 	}

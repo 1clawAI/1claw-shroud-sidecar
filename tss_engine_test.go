@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -79,5 +81,35 @@ func TestFrostThroughWasmProducesAValidEd25519Signature(t *testing.T) {
 		if _, err := e.Aggregate(ctx, pub1, tssServerID, c1, sh1, tssClientID, c2, bad, msg); err == nil {
 			t.Fatal("bad share aggregated")
 		}
+	}
+}
+
+// The sidecar derives XRPL signing data through the same restricted encoder
+// as the browser and the vault (vectors pinned in all three), and refuses a
+// transaction the vault's classifier would refuse.
+func TestCheckTransactionDerivesThePayloadAndRefusesBadShapes(t *testing.T) {
+	ctx := context.Background()
+	e, err := NewTssEngine(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx := `{"TransactionType":"Payment","Account":"r9LqNeG6qHxjeUocjvVki2XR35weJ9mZgQ","Destination":"rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe","Amount":"1000000","Fee":"12","Flags":2147483648,"Sequence":5,"LastLedgerSequence":1000,"SourceTag":482684816,"SigningPubKey":"ED5F5AC8B98974A3CA843326D9B88CEBD0560177B973EE0B149F782CFAA06DC66A"}`
+	payload, err := e.CheckTransaction(ctx, "xrp", "r9LqNeG6qHxjeUocjvVki2XR35weJ9mZgQ", []byte(tx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.ToUpper(hex.EncodeToString(payload)); got != "535458001200002280000000231CC52F902400000005201B000003E86140000000000F424068400000000000000C7321ED5F5AC8B98974A3CA843326D9B88CEBD0560177B973EE0B149F782CFAA06DC66A81145B812C9D57731E27A2DA8B1830195F88EF32A3B68314F667B0CA50CC7709A220B0561B85E53A48461FA8" {
+		t.Fatalf("payload mismatch: %s", got)
+	}
+	bad := strings.Replace(tx, "\"Payment\"", "\"SetRegularKey\"", 1)
+	if _, err := e.CheckTransaction(ctx, "xrp", "r9LqNeG6qHxjeUocjvVki2XR35weJ9mZgQ", []byte(bad)); err == nil {
+		t.Fatal("SetRegularKey was accepted")
+	}
+	if _, err := e.CheckTransaction(ctx, "xrp", "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe", []byte(tx)); err == nil {
+		t.Fatal("a transaction from another wallet was accepted")
+	}
+	msg := []byte{1, 2, 3}
+	if p, err := e.CheckTransaction(ctx, "solana", "x", msg); err != nil || string(p) != string(msg) {
+		t.Fatalf("solana payload is the message: %v", err)
 	}
 }

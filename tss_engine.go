@@ -254,6 +254,19 @@ func (e *TssEngine) SignRound2(ctx context.Context, id uint32, keyPackage, nonce
 	})
 }
 
+// CheckTransaction checks a prepared transaction for chain, from the wallet at
+// from, and derives the bytes a threshold signature must cover (Solana: the
+// message; XRPL: its signing data; Cardano: the body hash). The sidecar signs
+// what this returns, never bytes the vault chose.
+func (e *TssEngine) CheckTransaction(ctx context.Context, chain, from string, txContext []byte) ([]byte, error) {
+	return e.withBufs(ctx, [][]byte{[]byte(chain), []byte(from), txContext}, func(b []guestBuf) ([]byte, error) {
+		return e.call(ctx, "tss_check_transaction",
+			uint64(b[0].ptr), uint64(b[0].n),
+			uint64(b[1].ptr), uint64(b[1].n),
+			uint64(b[2].ptr), uint64(b[2].n))
+	})
+}
+
 // Aggregate both shares into a 64-byte Ed25519 signature (tests; the vault
 // aggregates in production).
 func (e *TssEngine) Aggregate(ctx context.Context, pubPackage []byte, idA uint32, commitA, shareA []byte, idB uint32, commitB, shareB, message []byte) ([]byte, error) {
