@@ -279,6 +279,10 @@ func (h *ShareHolder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			To    string `json:"to"`
 			Value string `json:"value"`
 			Memo  string `json:"memo,omitempty"`
+			// A transfer parked on a human approval (202) is resumed with
+			// resume_tx_id once approved; approval_id answers consensus.
+			ApprovalID string `json:"approval_id,omitempty"`
+			ResumeTxID string `json:"resume_tx_id,omitempty"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil || req.KeyID == "" || req.To == "" || req.Value == "" {
 			writeError(w, http.StatusBadRequest, "key_id, to and value are required")
@@ -289,10 +293,29 @@ func (h *ShareHolder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			To             string `json:"to"`
 			ValueBaseUnits string `json:"value_base_units"`
 		}
-		if code, err := h.api(ctx, http.MethodPost, fmt.Sprintf("/v1/agents/%s/tss/prepare", h.agentID), map[string]any{
-			"key_id": req.KeyID, "to": req.To, "value": req.Value, "memo": req.Memo,
-		}, &prepared); err != nil {
+		body := map[string]any{"key_id": req.KeyID, "to": req.To, "value": req.Value, "memo": req.Memo}
+		if req.ApprovalID != "" {
+			body["approval_id"] = req.ApprovalID
+		}
+		if req.ResumeTxID != "" {
+			body["resume_tx_id"] = req.ResumeTxID
+		}
+		var raw json.RawMessage
+		code, err := h.api(ctx, http.MethodPost, fmt.Sprintf("/v1/agents/%s/tss/prepare", h.agentID), body, &raw)
+		if err != nil {
 			writeError(w, upstreamStatus(code), err.Error())
+			return
+		}
+		// 202: the transfer waits on a human or M-of-N approval. Nothing was
+		// prepared, so there is nothing to sign; hand the caller the ids.
+		if code == http.StatusAccepted {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write(raw)
+			return
+		}
+		if err := json.Unmarshal(raw, &prepared); err != nil || prepared.Message == "" {
+			writeError(w, http.StatusBadGateway, "prepare returned no message")
 			return
 		}
 		message, err := base64.StdEncoding.DecodeString(prepared.Message)
