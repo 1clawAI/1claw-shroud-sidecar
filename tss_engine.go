@@ -227,10 +227,40 @@ func (e *TssEngine) KeygenPart3(ctx context.Context, secret2 []byte, otherID uin
 	return p[0], p[1], p[2], nil
 }
 
+// Curve selects the protocol exports: Ed25519 (`tss_*`) for Solana, XRPL and
+// Cardano, secp256k1 Taproot (`tss_tr_*`) for Bitcoin.
+type Curve int
+
+const (
+	CurveEd25519 Curve = iota
+	CurveSecp256k1Tr
+)
+
+// CurveForChain is the protocol a chain's threshold keys use.
+func CurveForChain(chain string) Curve {
+	switch chain {
+	case "bitcoin", "bitcoin-testnet", "bitcoin-signet":
+		return CurveSecp256k1Tr
+	}
+	return CurveEd25519
+}
+
+func (c Curve) export(step string) string {
+	if c == CurveSecp256k1Tr {
+		return "tss_tr_" + step
+	}
+	return "tss_" + step
+}
+
 // SignRound1 → nonces (keep, single use), commitments (send).
 func (e *TssEngine) SignRound1(ctx context.Context, keyPackage []byte) (nonces, commitments []byte, err error) {
+	return e.SignRound1Curve(ctx, CurveEd25519, keyPackage)
+}
+
+// SignRound1Curve is SignRound1 for either protocol.
+func (e *TssEngine) SignRound1Curve(ctx context.Context, curve Curve, keyPackage []byte) (nonces, commitments []byte, err error) {
 	out, err := e.withBufs(ctx, [][]byte{keyPackage}, func(b []guestBuf) ([]byte, error) {
-		return e.call(ctx, "tss_sign_round1", uint64(b[0].ptr), uint64(b[0].n))
+		return e.call(ctx, curve.export("sign_round1"), uint64(b[0].ptr), uint64(b[0].n))
 	})
 	if err != nil {
 		return nil, nil, err
@@ -244,8 +274,13 @@ func (e *TssEngine) SignRound1(ctx context.Context, keyPackage []byte) (nonces, 
 
 // SignRound2 → this party's signature share over message.
 func (e *TssEngine) SignRound2(ctx context.Context, id uint32, keyPackage, nonces, ownCommitments []byte, otherID uint32, otherCommitments, message []byte) ([]byte, error) {
+	return e.SignRound2Curve(ctx, CurveEd25519, id, keyPackage, nonces, ownCommitments, otherID, otherCommitments, message)
+}
+
+// SignRound2Curve is SignRound2 for either protocol.
+func (e *TssEngine) SignRound2Curve(ctx context.Context, curve Curve, id uint32, keyPackage, nonces, ownCommitments []byte, otherID uint32, otherCommitments, message []byte) ([]byte, error) {
 	return e.withBufs(ctx, [][]byte{keyPackage, nonces, ownCommitments, otherCommitments, message}, func(b []guestBuf) ([]byte, error) {
-		return e.call(ctx, "tss_sign_round2",
+		return e.call(ctx, curve.export("sign_round2"),
 			uint64(id), uint64(b[0].ptr), uint64(b[0].n),
 			uint64(b[1].ptr), uint64(b[1].n),
 			uint64(b[2].ptr), uint64(b[2].n),
@@ -265,6 +300,37 @@ func (e *TssEngine) CheckTransaction(ctx context.Context, chain, from string, tx
 			uint64(b[1].ptr), uint64(b[1].n),
 			uint64(b[2].ptr), uint64(b[2].n))
 	})
+}
+
+// CheckTransactionAll is CheckTransaction for a transaction with one payload
+// per input (Bitcoin): every payload, in order. Exactly one for other chains.
+func (e *TssEngine) CheckTransactionAll(ctx context.Context, chain, from string, txContext []byte) ([][]byte, error) {
+	out, err := e.withBufs(ctx, [][]byte{[]byte(chain), []byte(from), txContext}, func(b []guestBuf) ([]byte, error) {
+		return e.call(ctx, "tss_check_transaction_all",
+			uint64(b[0].ptr), uint64(b[0].n),
+			uint64(b[1].ptr), uint64(b[1].n),
+			uint64(b[2].ptr), uint64(b[2].n))
+	})
+	if err != nil {
+		return nil, err
+	}
+	var parts [][]byte
+	for len(out) > 0 {
+		if len(out) < 4 {
+			return nil, errors.New("tss: truncated payload list")
+		}
+		n := binary.LittleEndian.Uint32(out[:4])
+		out = out[4:]
+		if uint32(len(out)) < n {
+			return nil, errors.New("tss: truncated payload")
+		}
+		parts = append(parts, out[:n])
+		out = out[n:]
+	}
+	if len(parts) == 0 {
+		return nil, errors.New("tss: no payloads")
+	}
+	return parts, nil
 }
 
 // Aggregate both shares into a 64-byte Ed25519 signature (tests; the vault

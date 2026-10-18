@@ -198,7 +198,7 @@ func (h *ShareHolder) fetchShare(ctx context.Context, keyID string) ([]byte, err
 }
 
 // coSign runs the FROST rounds with the vault over a prepared message.
-func (h *ShareHolder) coSign(ctx context.Context, keyID string, message []byte) ([]byte, error) {
+func (h *ShareHolder) coSign(ctx context.Context, keyID string, message []byte) ([][]byte, error) {
 	share, err := h.fetchShare(ctx, keyID)
 	if err != nil {
 		return nil, err
@@ -208,11 +208,15 @@ func (h *ShareHolder) coSign(ctx context.Context, keyID string, message []byte) 
 	var begin struct {
 		SessionID         string `json:"session_id"`
 		ServerCommitments string `json:"server_commitments"`
+		// One per payload when the transaction has several (a Bitcoin input
+		// each); the single field is the first.
+		ServerCommitmentsAll []string `json:"server_commitments_all"`
 		// The wallet's chain and address, so the payload rule is known, and
-		// the vault's own derivation of the payload, for comparison only.
-		Chain          string `json:"chain"`
-		WalletAddress  string `json:"wallet_address"`
-		SigningPayload string `json:"signing_payload"`
+		// the vault's own derivation of the payloads, for comparison only.
+		Chain           string   `json:"chain"`
+		WalletAddress   string   `json:"wallet_address"`
+		SigningPayload  string   `json:"signing_payload"`
+		SigningPayloads []string `json:"signing_payloads"`
 	}
 	if _, err := h.api(ctx, http.MethodPost, fmt.Sprintf("/v1/agents/%s/tss/sign/begin", h.agentID), map[string]string{
 		"key_id":  keyID,
@@ -220,43 +224,82 @@ func (h *ShareHolder) coSign(ctx context.Context, keyID string, message []byte) 
 	}, &begin); err != nil {
 		return nil, err
 	}
-	serverCommit, err := base64.StdEncoding.DecodeString(begin.ServerCommitments)
-	if err != nil {
-		return nil, errors.New("tss: server commitments are not base64")
+	serverAll := begin.ServerCommitmentsAll
+	if len(serverAll) == 0 {
+		serverAll = []string{begin.ServerCommitments}
 	}
 	// Derive what we sign ourselves; refuse if the vault would aggregate over
 	// anything else. A vault older than this field signs the message itself,
 	// which is the payload on Solana, the only chain it served agents.
-	payload := message
+	payloads := [][]byte{message}
 	if begin.Chain != "" {
-		payload, err = h.engine.CheckTransaction(ctx, begin.Chain, begin.WalletAddress, message)
+		payloads, err = h.engine.CheckTransactionAll(ctx, begin.Chain, begin.WalletAddress, message)
 		if err != nil {
 			return nil, err
 		}
-		if begin.SigningPayload != "" && begin.SigningPayload != base64.StdEncoding.EncodeToString(payload) {
-			return nil, errors.New("tss: the vault would sign different bytes from this transaction; refusing")
+		vaultSays := begin.SigningPayloads
+		if len(vaultSays) == 0 && begin.SigningPayload != "" {
+			vaultSays = []string{begin.SigningPayload}
+		}
+		if len(vaultSays) > 0 {
+			if len(vaultSays) != len(payloads) {
+				return nil, errors.New("tss: the vault counts a different number of payloads; refusing")
+			}
+			for i, p := range payloads {
+				if vaultSays[i] != base64.StdEncoding.EncodeToString(p) {
+					return nil, errors.New("tss: the vault would sign different bytes from this transaction; refusing")
+				}
+			}
 		}
 	}
-	nonces, commit, err := h.engine.SignRound1(ctx, share)
-	if err != nil {
-		return nil, err
+	if len(serverAll) != len(payloads) {
+		return nil, fmt.Errorf("tss: %d payloads but %d vault commitments", len(payloads), len(serverAll))
 	}
-	defer zero(nonces)
-	sigShare, err := h.engine.SignRound2(ctx, tssClientID, share, nonces, commit, tssServerID, serverCommit, payload)
-	if err != nil {
-		return nil, err
+	curve := CurveForChain(begin.Chain)
+	commits := make([]string, len(payloads))
+	shares := make([]string, len(payloads))
+	for i, payload := range payloads {
+		serverCommit, err := base64.StdEncoding.DecodeString(serverAll[i])
+		if err != nil {
+			return nil, errors.New("tss: server commitments are not base64")
+		}
+		// A fresh round per payload: nonces are single use.
+		nonces, commit, err := h.engine.SignRound1Curve(ctx, curve, share)
+		if err != nil {
+			return nil, err
+		}
+		sigShare, err := h.engine.SignRound2Curve(ctx, curve, tssClientID, share, nonces, commit, tssServerID, serverCommit, payload)
+		zero(nonces)
+		if err != nil {
+			return nil, err
+		}
+		commits[i] = base64.StdEncoding.EncodeToString(commit)
+		shares[i] = base64.StdEncoding.EncodeToString(sigShare)
 	}
 	var done struct {
-		Signature string `json:"signature"`
+		Signature  string   `json:"signature"`
+		Signatures []string `json:"signatures"`
 	}
-	if _, err := h.api(ctx, http.MethodPost, fmt.Sprintf("/v1/agents/%s/tss/sign/complete", h.agentID), map[string]string{
-		"session_id":             begin.SessionID,
-		"client_commitments":     base64.StdEncoding.EncodeToString(commit),
-		"client_signature_share": base64.StdEncoding.EncodeToString(sigShare),
+	if _, err := h.api(ctx, http.MethodPost, fmt.Sprintf("/v1/agents/%s/tss/sign/complete", h.agentID), map[string]any{
+		"session_id":                  begin.SessionID,
+		"client_commitments":          commits[0],
+		"client_signature_share":      shares[0],
+		"client_commitments_all":      commits,
+		"client_signature_shares_all": shares,
 	}, &done); err != nil {
 		return nil, err
 	}
-	return base64.StdEncoding.DecodeString(done.Signature)
+	all := done.Signatures
+	if len(all) == 0 {
+		all = []string{done.Signature}
+	}
+	sigs := make([][]byte, len(all))
+	for i, s := range all {
+		if sigs[i], err = base64.StdEncoding.DecodeString(s); err != nil {
+			return nil, errors.New("tss: signature is not base64")
+		}
+	}
+	return sigs, nil
 }
 
 func zero(b []byte) {
@@ -323,16 +366,21 @@ func (h *ShareHolder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, "prepared message is not base64")
 			return
 		}
-		sig, err := h.coSign(ctx, req.KeyID, message)
+		sigs, err := h.coSign(ctx, req.KeyID, message)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
+		encoded := make([]string, len(sigs))
+		for i, s := range sigs {
+			encoded[i] = base64.StdEncoding.EncodeToString(s)
+		}
 		var out json.RawMessage
-		if code, err := h.api(ctx, http.MethodPost, fmt.Sprintf("/v1/agents/%s/tss/broadcast", h.agentID), map[string]string{
-			"key_id":    req.KeyID,
-			"message":   prepared.Message,
-			"signature": base64.StdEncoding.EncodeToString(sig),
+		if code, err := h.api(ctx, http.MethodPost, fmt.Sprintf("/v1/agents/%s/tss/broadcast", h.agentID), map[string]any{
+			"key_id":     req.KeyID,
+			"message":    prepared.Message,
+			"signature":  encoded[0],
+			"signatures": encoded,
 		}, &out); err != nil {
 			writeError(w, upstreamStatus(code), err.Error())
 			return
@@ -353,15 +401,20 @@ func (h *ShareHolder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "message is not base64")
 			return
 		}
-		sig, err := h.coSign(ctx, req.KeyID, message)
+		sigs, err := h.coSign(ctx, req.KeyID, message)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
+		encoded := make([]string, len(sigs))
+		for i, s := range sigs {
+			encoded[i] = base64.StdEncoding.EncodeToString(s)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"key_id":    req.KeyID,
-			"signature": base64.StdEncoding.EncodeToString(sig),
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"key_id":     req.KeyID,
+			"signature":  encoded[0],
+			"signatures": encoded,
 		})
 	default:
 		writeError(w, http.StatusNotFound, "unknown tss endpoint")
